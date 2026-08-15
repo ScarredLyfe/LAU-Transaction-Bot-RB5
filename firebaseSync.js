@@ -1,31 +1,43 @@
-// The season the bot writes to. Mirrors the WEBSITE's own logic so they always agree:
-//   1. A season explicitly marked status:'active' in data/seasonMeta wins.
-//   2. Otherwise, the data/defaultSeasonId is treated as active — UNLESS its seasonMeta
-//      entry explicitly says status:'finished' (a finished season is never a write target).
-// Only if there's truly no active season AND no usable default does it return null.
+// The season the bot writes to. This site stores the current season as
+// data/currentSeasonId, and the season list (with status) as data/seasons = [{id,name,status}].
+// (Older builds used data/seasonMeta / data/defaultSeasonId — still honored as a fallback.)
+// A season is a valid write target unless it is explicitly status:'finished' (locked).
 async function activeSeasonId() {
-  let meta = null;
-  try {
-    const res = await fetch(`${FB}/data/seasonMeta.json`);
-    meta = await res.json();
-  } catch (e) { console.error('[sync] seasonMeta fetch failed', e); }
+  // Primary: this site's real fields.
+  let seasons = null, currentId = null;
+  try { seasons = await (await fetch(`${FB}/data/seasons.json`)).json(); } catch {}
+  try { currentId = await (await fetch(`${FB}/data/currentSeasonId.json`)).json(); } catch {}
 
-  // 1) Explicit active season.
+  const statusOf = (id) => {
+    if (Array.isArray(seasons)) {
+      const s = seasons.find(x => x && String(x.id) === String(id));
+      return s ? (s.status || null) : null;
+    }
+    return null;
+  };
+
+  // 1) An explicitly-active season in data/seasons wins.
+  if (Array.isArray(seasons)) {
+    const a = seasons.find(s => s && s.status === 'active');
+    if (a && a.id != null) return a.id;
+  }
+  // 2) The current season, unless it's explicitly finished (locked).
+  if (currentId != null && statusOf(currentId) !== 'finished') return currentId;
+
+  // 3) Legacy fallback: older data/seasonMeta + data/defaultSeasonId layout.
+  let meta = null;
+  try { meta = await (await fetch(`${FB}/data/seasonMeta.json`)).json(); } catch {}
   if (Array.isArray(meta)) {
     const a = meta.find(s => s && s.status === 'active');
     if (a && a.id != null) return a.id;
   }
-
-  // 2) Fall back to defaultSeasonId (the site's notion of "the current season"),
-  //    as long as it isn't explicitly finished.
   try {
-    const res = await fetch(`${FB}/data/defaultSeasonId.json`);
-    const def = await res.json();
+    const def = await (await fetch(`${FB}/data/defaultSeasonId.json`)).json();
     if (def != null) {
-      const entry = Array.isArray(meta) ? meta.find(s => s && String(s.id) === String(def)) : null;
-      if (!entry || entry.status !== 'finished') return def;
+      const e = Array.isArray(meta) ? meta.find(s => s && String(s.id) === String(def)) : null;
+      if (!e || e.status !== 'finished') return def;
     }
-  } catch (e) { console.error('[sync] defaultSeasonId fetch failed', e); }
+  } catch {}
 
-  return null; // no active season → do not write
+  return null; // nothing usable → do not write
 }
