@@ -3,7 +3,30 @@ const fs = require('fs');
 const path = require('path');
 const { Client, Collection, GatewayIntentBits, Events } = require('discord.js');
 const { setWebsiteDisplayName } = require('./firebaseSync');
-const { ready } = require('./database');
+const { db, ready } = require('./database');
+const verifyWatcher = require('./verifyWatcher');
+
+const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
+// The public website where members register/link their Discord. Used in the Verify button DM.
+const WEBSITE_URL = process.env.WEBSITE_URL || 'https://laurb5.com';
+
+// Is this Discord user fully registered on the website (discordId + robloxId both linked)?
+async function isRegistered(discordId) {
+  try {
+    const pdb = await (await fetch(`${FB}/data/playerdb.json`)).json();
+    if (Array.isArray(pdb)) {
+      const hit = pdb.find(p => p && String(p.discordId || '') === String(discordId) && String(p.robloxId || '').trim());
+      if (hit) return true;
+    }
+  } catch {}
+  try {
+    const accts = await (await fetch(`${FB}/accounts.json`)).json();
+    if (accts && typeof accts === 'object') {
+      return Object.values(accts).some(a => a && String(a.discordId || '') === String(discordId) && String(a.robloxId || '').trim());
+    }
+  } catch {}
+  return false;
+}
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
@@ -37,6 +60,8 @@ client.once(Events.ClientReady, async c => {
   } catch (err) {
     console.error('Command registration failed:', err);
   }
+  // Start polling Firebase to auto-verify members who register on the website.
+  verifyWatcher.start(c);
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -45,6 +70,40 @@ client.on(Events.InteractionCreate, async interaction => {
     const command = client.commands.get(interaction.commandName);
     if (command && command.autocomplete) {
       try { await command.autocomplete(interaction); } catch (err) { console.error('Autocomplete error:', err); }
+    }
+    return;
+  }
+
+  // Verify button on the verification panel
+  if (interaction.isButton() && interaction.customId === 'verify_btn') {
+    try {
+      const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(interaction.guildId);
+      const registered = await isRegistered(interaction.user.id);
+
+      if (registered) {
+        // Already registered on the website → grant roles right now.
+        const member = interaction.member;
+        const toAdd = [];
+        if (settings && settings.verified_role_id)   toAdd.push(settings.verified_role_id);
+        if (settings && settings.free_agent_role_id) toAdd.push(settings.free_agent_role_id);
+        try { if (toAdd.length) await member.roles.add(toAdd, 'Verified via panel'); } catch (e) { console.error('[verify] button add roles failed', e); }
+        try {
+          if (settings && settings.unverified_role_id && member.roles.cache.has(settings.unverified_role_id)) {
+            await member.roles.remove(settings.unverified_role_id, 'Verified');
+          }
+        } catch (e) { console.error('[verify] button remove unverified failed', e); }
+        await interaction.reply({ content: '✅ You\'re verified! You now have access to the rest of the server.', flags: 1 << 6 });
+      } else {
+        // Not registered yet → send them to the website. The watcher will role them
+        // automatically within a few seconds of finishing registration.
+        await interaction.reply({
+          content: `You're not registered yet. Head to ${WEBSITE_URL} and link your Discord + Roblox to register.\n\nOnce you're done, you'll be verified automatically — or just click **Verify** again.`,
+          flags: 1 << 6,
+        });
+      }
+    } catch (err) {
+      console.error('Verify button error:', err);
+      try { await interaction.reply({ content: 'Something went wrong verifying you. Try again in a moment.', flags: 1 << 6 }); } catch {}
     }
     return;
   }
@@ -76,6 +135,18 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     }
   } catch (err) {
     console.error('Nickname auto-update failed:', err);
+  }
+});
+
+// Give new members the unverified role automatically until they register.
+client.on(Events.GuildMemberAdd, async member => {
+  try {
+    const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(member.guild.id);
+    if (settings && settings.unverified_role_id) {
+      await member.roles.add(settings.unverified_role_id, 'New member — not yet verified').catch(() => {});
+    }
+  } catch (err) {
+    console.error('Auto-unverified-role failed:', err);
   }
 });
 
