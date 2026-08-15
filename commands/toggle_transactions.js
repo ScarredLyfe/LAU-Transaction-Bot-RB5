@@ -8,7 +8,7 @@ module.exports = {
     .setName('toggle_transactions')
     .setDescription('Turn a transaction type on or off')
     .addStringOption(o => o.setName('action').setDescription('Which transaction type').setRequired(true)
-      .addChoices({ name: 'Signings (offers)', value: 'signings' }, { name: 'Releases', value: 'releases' }, { name: 'Demands', value: 'demands' }))
+      .addChoices({ name: 'Offers', value: 'signings' }, { name: 'Releases', value: 'releases' }, { name: 'Demands', value: 'demands' }))
     .addStringOption(o => o.setName('status').setDescription('On or off').setRequired(true)
       .addChoices({ name: 'On', value: 'on' }, { name: 'Off', value: 'off' }))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
