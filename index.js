@@ -62,6 +62,8 @@ client.once(Events.ClientReady, async c => {
   }
   // Start polling Firebase to auto-verify members who register on the website.
   verifyWatcher.start(c);
+  // Start polling Firebase for score-publish requests from the website.
+  try { require('./scorePublisher').start(c); } catch (err) { console.error('Score publisher failed to start:', err); }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
