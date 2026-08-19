@@ -70,17 +70,29 @@ async function processPublish(client, req) {
   console.log(`[scores] posted ${h.name || h.abbr} vs ${a.name || a.abbr}`);
 }
 
+let _polling = false;
 async function poll(client) {
+  if (_polling) return;        // never let two polls overlap
+  _polling = true;
   try {
     const res = await fetch(`${FB}/score_publish_queue.json`);
     const queue = await res.json();
     if (!queue) return;
     for (const [key, req] of Object.entries(queue)) {
+      // CLAIM FIRST: delete the entry before posting. If the delete didn't actually remove
+      // it (already gone), skip — this guarantees a request is posted at most once even if
+      // posting is slow or a later poll overlaps.
+      let claimed = false;
+      try {
+        const del = await fetch(`${FB}/score_publish_queue/${key}.json`, { method: 'DELETE' });
+        claimed = del.ok;
+      } catch (e) { claimed = false; }
+      if (!claimed) continue;
       try { await processPublish(client, req); }
       catch (e) { console.error('[scores] process failed', e); }
-      await fetch(`${FB}/score_publish_queue/${key}.json`, { method: 'DELETE' }).catch(() => {});
     }
   } catch (e) { console.error('[scores] poll error', e); }
+  finally { _polling = false; }
 }
 
 function start(client) {
