@@ -10,7 +10,7 @@ module.exports = {
     ensureGuild(interaction.guildId);
 
     const embed = new EmbedBuilder()
-      .setColor(0xf87572)
+      .setColor(0x4f8ef7)
       .setTitle(`Welcome to ${interaction.guild.name}!`)
       .setDescription('Click the button below to verify and gain access to the rest of the server.');
     const logo = interaction.guild.iconURL();
