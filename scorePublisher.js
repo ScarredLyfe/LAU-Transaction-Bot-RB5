@@ -1,5 +1,5 @@
-// Polls Firebase for score-publish requests from the website and posts an embed
-// (with the box-score image) to the configured scores channel, then deletes the request.
+// Polls Firebase for score-publish requests from the website and posts a plain-text
+// matchup line (with the box-score image) to the configured scores channel.
 const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { db } = require('./database');
 
@@ -24,49 +24,35 @@ async function processPublish(client, req) {
     || teams.find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase());
   const emojiFor = (t) => (t && t.emoji) ? t.emoji + ' ' : '';
 
-  const leagueName = guild.name;
-
   const h = req.home || {}, a = req.away || {};
-  const line = (t) => {
-    const rec = t.record ? '(' + t.record + ') ' : '';
+
+  // Build the matchup line:
+  // (Home Record) HomeEmoji @Home vs @Away AwayEmoji (Away Record)
+  const teamStr = (t, side) => {
     const td = teamOf(t.abbr, t.name);
-    const who = (td && td.role_id) ? `<@&${td.role_id}>` : `**${t.name || t.abbr}**`;
-    return `${rec}${emojiFor(td)}${who} \`${t.score}\``;
+    const at = (td && td.role_id) ? `<@&${td.role_id}>` : `@${t.name || t.abbr}`;
+    const emoji = emojiFor(td).trim();
+    const rec = t.record ? `(${t.record})` : '';
+    if (side === 'left') {
+      // (Record) Emoji @Team
+      return [rec, emoji, at].filter(Boolean).join(' ');
+    } else {
+      // @Team Emoji (Record)
+      return [at, emoji, rec].filter(Boolean).join(' ');
+    }
   };
-  const headerLine = req.header || (req.preseason
-    ? `Pre-Season · ${req.week}`
-    : `Season ${req.season}, Week ${req.week}`);
-
-  let pdb = [];
-  try { pdb = (await (await fetch(`${FB}/data/playerdb.json`)).json()) || []; } catch (e) {}
-  const idByName = {};
-  if (Array.isArray(pdb)) pdb.forEach(p => { if (p && p.name && p.discordId) idByName[String(p.name).toLowerCase()] = p.discordId; });
-  const mention = (robloxName, fallback) => {
-    const id = robloxName ? idByName[String(robloxName).toLowerCase()] : null;
-    return id ? `<@${id}>` : (fallback || '—');
-  };
-  const potgTxt = mention(req.potgName, req.potg);
-  const lpotgTxt = mention(req.lpotgName, req.lpotg);
-
-  const desc =
-    `***__${leagueName}__***\n` +
-    `${headerLine}\n` +
-    `${line(h)}\n${line(a)}\n\n` +
-    `**POTG:** ${potgTxt}\n` +
-    `**LPOTG:** ${lpotgTxt}`;
-
-  const embed = new EmbedBuilder().setColor(0x4f8ef7).setDescription(desc);
+  const content = `${teamStr(h, 'left')} vs ${teamStr(a, 'right')}`;
 
   const files = [];
   if (req.image) {
     try {
       const buf = Buffer.from(req.image, 'base64');
       files.push(new AttachmentBuilder(buf, { name: 'boxscore.png' }));
-      embed.setImage('attachment://boxscore.png');
     } catch (e) { console.error('[scores] image decode failed', e); }
   }
 
-  await channel.send({ embeds: [embed], files });
+  // Show the @team mentions as text without pinging the whole role on every score post.
+  await channel.send({ content, files, allowedMentions: { parse: [] } });
   console.log(`[scores] posted ${h.name || h.abbr} vs ${a.name || a.abbr}`);
 }
 
