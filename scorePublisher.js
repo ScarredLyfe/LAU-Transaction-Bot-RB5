@@ -1,9 +1,9 @@
-// Polls Firebase for score-publish requests from the website and posts a plain-text
-// matchup line (with the box-score image) to the configured scores channel.
+// Polls Firebase for score-publish requests from the website and posts an embed
+// (with the box-score image) to the configured scores channel.
 const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { db } = require('./database');
 
-const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
+const FB = 'https://laurh2-default-rtdb.firebaseio.com';
 const POLL_MS = 8000;
 
 async function processPublish(client, req) {
@@ -22,26 +22,19 @@ async function processPublish(client, req) {
   const teamOf = (abbr, name) =>
     teams.find(x => x.name && abbr && String(x.name).toLowerCase() === String(abbr).toLowerCase())
     || teams.find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase());
-  const emojiFor = (t) => (t && t.emoji) ? t.emoji + ' ' : '';
+  const emojiOf = (t) => (t && t.emoji) ? t.emoji : '';
+  const mentionOf = (t) => (t && t.role_id) ? `<@&${t.role_id}>` : null;
 
   const h = req.home || {}, a = req.away || {};
+  const hTeam = teamOf(h.abbr, h.name), aTeam = teamOf(a.abbr, a.name);
+  const hName = mentionOf(hTeam) || `**${h.name || h.abbr}**`;
+  const aName = mentionOf(aTeam) || `**${a.name || a.abbr}**`;
+  const hEmoji = emojiOf(hTeam), aEmoji = emojiOf(aTeam);
 
-  // Build the matchup line:
-  // (Home Record) HomeEmoji @Home vs @Away AwayEmoji (Away Record)
-  const teamStr = (t, side) => {
-    const td = teamOf(t.abbr, t.name);
-    const at = (td && td.role_id) ? `<@&${td.role_id}>` : `@${t.name || t.abbr}`;
-    const emoji = emojiFor(td).trim();
-    const rec = t.record ? `(${t.record})` : '';
-    if (side === 'left') {
-      // (Record) Emoji @Team
-      return [rec, emoji, at].filter(Boolean).join(' ');
-    } else {
-      // @Team Emoji (Record)
-      return [at, emoji, rec].filter(Boolean).join(' ');
-    }
-  };
-  const content = `${teamStr(h, 'left')} vs ${teamStr(a, 'right')}`;
+  // (Home Record) HomeEmoji @Home  vs  @Away AwayEmoji (Away Record)
+  const homeSide = `${h.record ? '(' + h.record + ') ' : ''}${hEmoji ? hEmoji + ' ' : ''}${hName}`;
+  const awaySide = `${aName}${aEmoji ? ' ' + aEmoji : ''}${a.record ? ' (' + a.record + ')' : ''}`;
+  const content = `${homeSide} vs ${awaySide}`;
 
   const files = [];
   if (req.image) {
@@ -51,34 +44,23 @@ async function processPublish(client, req) {
     } catch (e) { console.error('[scores] image decode failed', e); }
   }
 
-  // Show the @team mentions as text without pinging the whole role on every score post.
+  // Plain message (no embed). Suppress pings so the @team mentions render but don't notify.
   await channel.send({ content, files, allowedMentions: { parse: [] } });
   console.log(`[scores] posted ${h.name || h.abbr} vs ${a.name || a.abbr}`);
 }
 
-let _polling = false;
 async function poll(client) {
-  if (_polling) return;        // never let two polls overlap
-  _polling = true;
   try {
     const res = await fetch(`${FB}/score_publish_queue.json`);
     const queue = await res.json();
     if (!queue) return;
     for (const [key, req] of Object.entries(queue)) {
-      // CLAIM FIRST: delete the entry before posting. If the delete didn't actually remove
-      // it (already gone), skip — this guarantees a request is posted at most once even if
-      // posting is slow or a later poll overlaps.
-      let claimed = false;
-      try {
-        const del = await fetch(`${FB}/score_publish_queue/${key}.json`, { method: 'DELETE' });
-        claimed = del.ok;
-      } catch (e) { claimed = false; }
-      if (!claimed) continue;
       try { await processPublish(client, req); }
       catch (e) { console.error('[scores] process failed', e); }
+      // Always remove the request so it isn't posted twice.
+      await fetch(`${FB}/score_publish_queue/${key}.json`, { method: 'DELETE' }).catch(() => {});
     }
   } catch (e) { console.error('[scores] poll error', e); }
-  finally { _polling = false; }
 }
 
 function start(client) {
