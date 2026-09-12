@@ -36,7 +36,10 @@ db.exec(`
     free_agent_role_id TEXT,
     verified_role_id TEXT,
     unverified_role_id TEXT,
-    scores_channel_id TEXT
+    scores_channel_id TEXT,
+    media_ping_role_id TEXT,
+    event_ping_role_id TEXT,
+    stream_alert_role_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS teams (
@@ -82,6 +85,9 @@ addColumn('guild_settings', 'free_agent_role_id TEXT');
 addColumn('guild_settings', 'verified_role_id TEXT');
 addColumn('guild_settings', 'unverified_role_id TEXT');
 addColumn('guild_settings', 'scores_channel_id TEXT');
+addColumn('guild_settings', 'media_ping_role_id TEXT');
+addColumn('guild_settings', 'event_ping_role_id TEXT');
+addColumn('guild_settings', 'stream_alert_role_id TEXT');
 addColumn('teams', 'coach1_id TEXT');
 addColumn('teams', 'coach2_id TEXT');
 
