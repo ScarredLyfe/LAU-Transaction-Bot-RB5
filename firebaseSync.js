@@ -7,7 +7,9 @@
 // database the website uses. If you move the site to a different Firebase project, change
 // FIREBASE_URL (env) or the fallback below.
 
-const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
+const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
+const DATA_KEY = process.env.DATA_API_KEY || '';
+const _wHdr = (h) => Object.assign({ 'Content-Type': 'application/json' }, DATA_KEY ? { 'X-Api-Key': DATA_KEY } : {}, h || {});
 
 // Look up a player's website name (their Roblox name in playerdb) from their Discord ID.
 async function nameFromDiscordId(discordId) {
@@ -81,7 +83,7 @@ async function loadSeasonRosters(sid) {
   return {};
 }
 async function saveSeasonRosters(sid, obj) {
-  await fetch(`${FB}/rosters/season_${sid}.json`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
+  await fetch(`${FB}/rosters/season_${sid}.json`, { method: 'PUT', headers: _wHdr(), body: JSON.stringify(obj) });
 }
 
 // Add a player to a team's website roster (and remove them from any other team's roster first).
@@ -171,7 +173,7 @@ async function setWebsiteDisplayName(discordId, member) {
     if (arr[idx].displayName === name) return { ok: true };
     arr[idx].displayName = name;
     await fetch(`${FB}/data/playerdb.json`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(arr),
+      method: 'PUT', headers: _wHdr(), body: JSON.stringify(arr),
     });
     console.log(`[sync] displayName set: ${discordId} -> "${name}"`);
     return { ok: true, name };

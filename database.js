@@ -10,7 +10,9 @@ const os = require('os');
 // Firebase project + the key THIS bot stores its OWN data under. This is the SAME Firebase
 // database the website uses. Give each of your bots a DIFFERENT BOT_DB_KEY (e.g.
 // bot_db_transactions) so multiple bots never overwrite each other's settings.
-const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
+const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
+const DATA_KEY = process.env.DATA_API_KEY || '';
+const _wHdr = (h) => Object.assign({ 'Content-Type': 'application/json' }, DATA_KEY ? { 'X-Api-Key': DATA_KEY } : {}, h || {});
 const SNAP_KEY = process.env.BOT_DB_KEY || 'bot_db';
 
 // Local scratch cache (ephemeral — Firebase is authoritative; this is just fast working memory).
@@ -98,7 +100,7 @@ function snapshot() {
 }
 async function saveToFirebase() {
   try {
-    await fetch(`${FB}/${SNAP_KEY}.json`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshot()) });
+    await fetch(`${FB}/${SNAP_KEY}.json`, { method: 'PUT', headers: _wHdr(), body: JSON.stringify(snapshot()) });
   } catch (e) { console.error('[db] save to Firebase failed', e); }
 }
 async function loadFromFirebase() {

@@ -3,7 +3,9 @@
 const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { db } = require('./database');
 
-const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
+const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
+const DATA_KEY = process.env.DATA_API_KEY || '';
+const _wHdr = (h) => Object.assign({ 'Content-Type': 'application/json' }, DATA_KEY ? { 'X-Api-Key': DATA_KEY } : {}, h || {});
 const POLL_MS = 8000;
 
 async function processPublish(client, req) {
@@ -70,7 +72,7 @@ async function poll(client) {
       // posting is slow or a later poll overlaps.
       let claimed = false;
       try {
-        const del = await fetch(`${FB}/score_publish_queue/${key}.json`, { method: 'DELETE' });
+        const del = await fetch(`${FB}/score_publish_queue/${key}.json`, { method: 'DELETE', headers: _wHdr() });
         claimed = del.ok;
       } catch (e) { claimed = false; }
       if (!claimed) continue;
