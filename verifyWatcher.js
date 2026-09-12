@@ -1,18 +1,12 @@
 // Auto-verify watcher.
-// The website has no "verify_queue" — instead, a person is considered REGISTERED once their
-// website profile has BOTH a discordId and a robloxId linked. This watcher polls Firebase,
-// finds every fully-registered member who is in the server but doesn't yet have the verified
-// role, grants them verified + free-agent roles, and removes the unverified role.
-//
-// This needs NO changes to the website: registering on the site (linking Discord + Roblox)
-// is what flips the switch, and the bot notices within a few seconds.
+// A person is REGISTERED once their website profile has BOTH a discordId and a robloxId.
+// This watcher polls the data server, finds every fully-registered member in the server who
+// doesn't yet have the verified role, and grants verified + free-agent roles (removing unverified).
 const { db } = require('./database');
 
-const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
+const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
 const POLL_MS = 8000;
 
-// Collect the Discord IDs of everyone who is fully registered on the website
-// (has both a discordId and a robloxId). Checks playerdb first, then accounts as a backup.
 async function fetchRegisteredDiscordIds() {
   const ids = new Set();
   try {
@@ -35,17 +29,18 @@ async function fetchRegisteredDiscordIds() {
         }
       }
     }
-  } catch (e) { /* accounts is optional; playerdb is the primary source */ }
+  } catch (e) { /* accounts is optional */ }
 
   return ids;
 }
 
 async function grantVerified(guild, settings, discordId) {
   const member = await guild.members.fetch(discordId).catch(() => null);
-  if (!member) return false;
+  if (!member) { return false; } // not in the server — skip quietly
 
-  // Already verified? Nothing to do (keeps the poll quiet and avoids re-DMing).
   if (settings.verified_role_id && member.roles.cache.has(settings.verified_role_id)) return false;
+
+  console.log(`[verify] ${member.user.tag} is registered but not verified — granting roles`);
 
   const toAdd = [];
   if (settings.verified_role_id)   toAdd.push(settings.verified_role_id);
@@ -72,13 +67,19 @@ async function poll(client) {
     if (!guild) return;
 
     const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(guildId);
-    // Nothing to do until an admin has set at least a verified role.
-    if (!settings || !settings.verified_role_id) return;
+    if (!settings || !settings.verified_role_id) {
+      console.log('[verify] SKIP: no verified_role_id set — run /set_verified_role in the server');
+      return;
+    }
 
     const registered = await fetchRegisteredDiscordIds();
+    console.log(`[verify] poll: ${registered.size} fully-registered account(s) found on the site`);
     for (const discordId of registered) {
-      try { await grantVerified(guild, settings, discordId); }
-      catch (e) { console.error('[verify] grant failed', e); }
+      try {
+        const r = await grantVerified(guild, settings, discordId);
+        if (r) console.log(`[verify] granted roles to ${discordId}`);
+      }
+      catch (e) { console.error('[verify] grant failed for ' + discordId, e); }
     }
   } catch (e) { console.error('[verify] poll error', e); }
 }
