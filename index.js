@@ -6,25 +6,33 @@ const { setWebsiteDisplayName } = require('./firebaseSync');
 const { db, ready } = require('./database');
 const verifyWatcher = require('./verifyWatcher');
 
-const FB = (process.env.FIREBASE_URL || 'https://lau-website-default-rtdb.firebaseio.com').replace(/\/+$/, '');
-// The public website where members register/link their Discord. Used in the Verify button DM.
+const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://laurb5.com';
 
-// Is this Discord user fully registered on the website (discordId + robloxId both linked)?
 async function isRegistered(discordId) {
+  console.log(`[verify-btn] checking registration for ${discordId} against ${FB}`);
   try {
-    const pdb = await (await fetch(`${FB}/data/playerdb.json`)).json();
+    const res = await fetch(`${FB}/data/playerdb.json`);
+    const pdb = await res.json();
     if (Array.isArray(pdb)) {
+      console.log(`[verify-btn] playerdb loaded: ${pdb.length} entries`);
       const hit = pdb.find(p => p && String(p.discordId || '') === String(discordId) && String(p.robloxId || '').trim());
-      if (hit) return true;
+      if (hit) { console.log(`[verify-btn] MATCH in playerdb: ${hit.name}`); return true; }
+      console.log(`[verify-btn] no playerdb entry with discordId=${discordId} + robloxId`);
+    } else {
+      console.log(`[verify-btn] playerdb was not an array (got ${typeof pdb}) — data path or URL may be wrong`);
     }
-  } catch {}
+  } catch (e) { console.error('[verify-btn] playerdb fetch failed:', e.message); }
   try {
     const accts = await (await fetch(`${FB}/accounts.json`)).json();
     if (accts && typeof accts === 'object') {
-      return Object.values(accts).some(a => a && String(a.discordId || '') === String(discordId) && String(a.robloxId || '').trim());
+      const ok = Object.values(accts).some(a => a && String(a.discordId || '') === String(discordId) && String(a.robloxId || '').trim());
+      console.log(`[verify-btn] accounts check for ${discordId}: ${ok ? 'MATCH' : 'no match'} (${Object.keys(accts).length} accounts)`);
+      return ok;
+    } else {
+      console.log(`[verify-btn] accounts was not an object (got ${typeof accts})`);
     }
-  } catch {}
+  } catch (e) { console.error('[verify-btn] accounts fetch failed:', e.message); }
   return false;
 }
 
@@ -41,7 +49,6 @@ for (const file of fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'))) 
   }
 }
 
-// Auto-register all slash commands on startup, so any command change goes live on deploy.
 client.once(Events.ClientReady, async c => {
   console.log(`Logged in as ${c.user.tag}`);
   try {
@@ -60,14 +67,12 @@ client.once(Events.ClientReady, async c => {
   } catch (err) {
     console.error('Command registration failed:', err);
   }
-  // Start polling Firebase to auto-verify members who register on the website.
+  console.log(`[data] bot is reading/writing data at: ${FB}`);
   verifyWatcher.start(c);
-  // Start polling Firebase for score-publish requests from the website.
   try { require('./scorePublisher').start(c); } catch (err) { console.error('Score publisher failed to start:', err); }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
-  // Autocomplete (e.g. /promote coach picker showing live role names)
   if (interaction.isAutocomplete()) {
     const command = client.commands.get(interaction.commandName);
     if (command && command.autocomplete) {
@@ -76,14 +81,12 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  // Verify button on the verification panel
   if (interaction.isButton() && interaction.customId === 'verify_btn') {
     try {
       const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(interaction.guildId);
       const registered = await isRegistered(interaction.user.id);
 
       if (registered) {
-        // Already registered on the website → grant roles right now.
         const member = interaction.member;
         const toAdd = [];
         if (settings && settings.verified_role_id)   toAdd.push(settings.verified_role_id);
@@ -96,8 +99,6 @@ client.on(Events.InteractionCreate, async interaction => {
         } catch (e) { console.error('[verify] button remove unverified failed', e); }
         await interaction.reply({ content: '✅ You\'re verified! You now have access to the rest of the server.', flags: 1 << 6 });
       } else {
-        // Not registered yet → send them to the website. The watcher will role them
-        // automatically within a few seconds of finishing registration.
         await interaction.reply({
           content: `You're not registered yet. Head to ${WEBSITE_URL} and link your Discord + Roblox to register.\n\nOnce you're done, you'll be verified automatically — or just click **Verify** again.`,
           flags: 1 << 6,
@@ -126,8 +127,6 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-// Auto-update the website display name whenever someone's server nickname changes,
-// so player profile names on the site always match their Discord server name.
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   try {
     const oldName = oldMember.nickname || (oldMember.user && oldMember.user.globalName) || (oldMember.user && oldMember.user.username);
@@ -140,7 +139,6 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   }
 });
 
-// Give new members the unverified role automatically until they register.
 client.on(Events.GuildMemberAdd, async member => {
   try {
     const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(member.guild.id);
@@ -156,7 +154,6 @@ client.on('error', err => console.error('Client error:', err));
 process.on('unhandledRejection', err => console.error('Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('Uncaught exception:', err));
 
-// Wait for the initial data load from Firebase, then log in.
 (async () => {
   try { await ready; } catch (e) { console.error('[db] initial load error', e); }
   client.login(process.env.DISCORD_TOKEN);
