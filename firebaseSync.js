@@ -321,6 +321,40 @@ async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [
 
   // ── Display names: mutate the array we already have, write it once ──
   let nameChanged = false;
+
+  // BACKFILL: many playerdb rows are Roblox-only (no discordId) even though the person HAS
+  // linked Discord — the link lives in the accounts node but was never copied onto the
+  // playerdb row. Without a discordId on the row, /sync can't match them and their card keeps
+  // showing the Roblox name. So first, copy discordId (+ username/avatar) from accounts onto
+  // any playerdb row that's missing it, matching by robloxId. This permanently fixes the row
+  // so this and every future sync can find them.
+  const acctByRoblox = new Map();   // robloxId -> account object
+  const acctByDiscord = new Map();  // discordId -> account object
+  if (accounts && typeof accounts === 'object') {
+    Object.values(accounts).forEach(a => {
+      if (!a) return;
+      const rid = String(a.robloxId || '').trim();
+      const did = String(a.discordId || '').trim();
+      if (rid && did) acctByRoblox.set(rid, a);
+      if (did) acctByDiscord.set(did, a);
+    });
+  }
+  playerdb.forEach(p => {
+    if (!p) return;
+    if (p.discordId) return;                 // already has one
+    const rid = String(p.robloxId || '').trim();
+    if (!rid) return;
+    const acct = acctByRoblox.get(rid);
+    if (acct) {
+      p.discordId = String(acct.discordId);
+      if (acct.discordUsername && !p.discordUsername) p.discordUsername = acct.discordUsername;
+      if (acct.discordAvatar && !p.discordAvatar) p.discordAvatar = acct.discordAvatar;
+      nameChanged = true;                     // row changed, needs a write
+      console.log(`[sync] backfilled discordId ${acct.discordId} onto playerdb row "${p.name}" from accounts`);
+    }
+  });
+
+  // Now build the discordId -> row index map (AFTER backfill so newly-linked rows are included).
   const idxByDiscord = new Map();
   playerdb.forEach((p, i) => { if (p && p.discordId) idxByDiscord.set(String(p.discordId), i); });
   for (const [discordId, displayName] of nameJobs) {
