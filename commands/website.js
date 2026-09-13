@@ -2,10 +2,37 @@ const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, AttachmentBuilde
 const path = require('path');
 const fs = require('fs');
 
-// Image is attached from a local file rather than an external URL -- avoids depending on
-// any third-party image host staying up (a hosted-URL version breaks silently once that
-// link expires or changes, with no way for the bot to detect or recover from it).
-const BANNER_PATH = path.join(__dirname, '..', 'assets', 'website-banner.png');
+// The banner is attached from a local file rather than a hosted URL -- a third-party image
+// host going down or expiring a link breaks the embed silently, with no way for the bot to
+// notice or recover.
+//
+// Rather than hardcoding one filename, this picks up whatever image is sitting in assets/.
+// Preference order: a file whose name mentions "banner", then "website", then the first
+// image found. Linux is case-sensitive, so matching is done lowercased -- that avoids the
+// classic "works on my Windows machine, missing on the server" filename-casing trap.
+const ASSETS_DIR = path.join(__dirname, '..', 'assets');
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+
+function findBanner() {
+  let files;
+  try {
+    files = fs.readdirSync(ASSETS_DIR);
+  } catch (err) {
+    console.warn('[website] no assets folder at', ASSETS_DIR);
+    return null;
+  }
+  const images = files.filter(f => IMAGE_EXTS.includes(path.extname(f).toLowerCase()));
+  if (!images.length) {
+    console.warn('[website] assets folder has no image files:', files.join(', ') || '(empty)');
+    return null;
+  }
+  const pick =
+    images.find(f => f.toLowerCase().includes('banner')) ||
+    images.find(f => f.toLowerCase().includes('website')) ||
+    images[0];
+  console.log('[website] using banner:', pick);
+  return path.join(ASSETS_DIR, pick);
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -41,13 +68,18 @@ module.exports = {
         },
       );
 
+    // Re-read the folder on every call so swapping the image out doesn't need a redeploy.
+    const bannerPath = findBanner();
     const files = [];
-    if (fs.existsSync(BANNER_PATH)) {
-      const attachment = new AttachmentBuilder(BANNER_PATH, { name: 'website-banner.png' });
-      embed.setImage('attachment://website-banner.png');
-      files.push(attachment);
+    if (bannerPath) {
+      // Attach under a fixed name so the embed reference below always matches, whatever
+      // the file is actually called on disk.
+      const ext = path.extname(bannerPath).toLowerCase();
+      const attachName = 'website-banner' + ext;
+      files.push(new AttachmentBuilder(bannerPath, { name: attachName }));
+      embed.setImage('attachment://' + attachName);
     } else {
-      console.warn('[website] banner not found at', BANNER_PATH, '-- posting without image');
+      console.warn('[website] posting without an image');
     }
 
     // No ephemeral flag -- this is meant to be visible to everyone in the channel, not
