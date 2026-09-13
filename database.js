@@ -9,6 +9,8 @@ const os = require('os');
 
 const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
 const SNAP_KEY = process.env.BOT_DB_KEY || 'bot_db';
+const DATA_KEY = process.env.DATA_API_KEY || '';
+const _wHdr = (h) => Object.assign({ 'Content-Type': 'application/json' }, DATA_KEY ? { 'X-Api-Key': DATA_KEY } : {}, h || {});
 
 const DB_PATH = path.join(process.env.DB_DIR || os.tmpdir(), 'league_cache.db');
 const db = new DatabaseSync(DB_PATH);
@@ -33,7 +35,9 @@ db.exec(`
     scores_channel_id TEXT,
     event_ping_role_id TEXT,
     media_ping_role_id TEXT,
-    stream_alert_role_id TEXT
+    stream_alert_role_id TEXT,
+    franchise_channel_id TEXT,
+    franchise_message_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS teams (
@@ -100,6 +104,8 @@ addColumn('guild_settings', 'scores_channel_id TEXT');
 addColumn('guild_settings', 'event_ping_role_id TEXT');
 addColumn('guild_settings', 'media_ping_role_id TEXT');
 addColumn('guild_settings', 'stream_alert_role_id TEXT');
+addColumn('guild_settings', 'franchise_channel_id TEXT');
+addColumn('guild_settings', 'franchise_message_id TEXT');
 addColumn('teams', 'coach1_id TEXT');
 addColumn('teams', 'coach2_id TEXT');
 
@@ -118,9 +124,7 @@ function snapshot() {
 }
 async function saveToFirebase() {
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (process.env.DATA_API_KEY) headers['X-Api-Key'] = process.env.DATA_API_KEY;
-    await fetch(`${FB}/${SNAP_KEY}.json`, { method: 'PUT', headers, body: JSON.stringify(snapshot()) });
+    await fetch(`${FB}/${SNAP_KEY}.json`, { method: 'PUT', headers: _wHdr(), body: JSON.stringify(snapshot()) });
   } catch (e) { console.error('[db] save to Firebase failed', e); }
 }
 async function loadFromFirebase() {
