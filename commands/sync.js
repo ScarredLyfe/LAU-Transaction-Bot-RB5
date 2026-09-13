@@ -167,7 +167,11 @@ module.exports = {
     }
 
     if (res.noProfile.length) {
-      msg += `\n\nℹ️ ${res.noProfile.length} player${res.noProfile.length === 1 ? ' has' : 's have'} a linked account but no player profile yet, so no roster spot was written for them.`;
+      // Name them — knowing the count without knowing WHO is useless for actually fixing it.
+      msg += `\n\nℹ️ ${res.noProfile.length} player${res.noProfile.length === 1 ? ' has' : 's have'} a linked account but no player profile yet, so no roster spot was written for them: ` +
+             res.noProfile.slice(0, 20).map(id => `<@${id}>`).join(', ') +
+             (res.noProfile.length > 20 ? ` and ${res.noProfile.length - 20} more` : '') +
+             `\nTheir Discord is linked, but there's no entry under their Roblox name in the site's player database — usually a half-finished link. Have them open their profile on the website and re-link Roblox.`;
     }
 
     if (res.unknownTeams.length) {
