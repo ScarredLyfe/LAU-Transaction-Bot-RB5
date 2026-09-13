@@ -224,8 +224,26 @@ async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [
   season = (season && typeof season === 'object') ? season : {};
 
   // ── Build in-memory lookups ──
+  // Map Discord ID -> player name. If the same Discord ID appears on more than one row
+  // (which happens when someone unlinks and relinks and the old row wasn't cleared), prefer
+  // the row that actually has a robloxId — a row with no Roblox link can't be matched to
+  // anything on the site anyway. Plain last-write-wins would pick whichever happened to sit
+  // later in the array, which is arbitrary.
   const nameByDiscord = new Map();
-  playerdb.forEach(p => { if (p && p.discordId) nameByDiscord.set(String(p.discordId), p.name || null); });
+  const rowByDiscord = new Map();
+  playerdb.forEach(p => {
+    if (!p || !p.discordId) return;
+    const did = String(p.discordId);
+    const prev = rowByDiscord.get(did);
+    if (prev) {
+      console.warn(`[sync] playerdb has ${did} on more than one row: "${prev.name}" and "${p.name}" — using whichever has a robloxId`);
+      const prevLinked = String(prev.robloxId || '').trim();
+      const thisLinked = String(p.robloxId || '').trim();
+      if (prevLinked && !thisLinked) return;  // keep the existing, better row
+    }
+    rowByDiscord.set(did, p);
+    nameByDiscord.set(did, p.name || null);
+  });
   const abbrByTeamName = new Map();
   teamDefs.forEach(t => { if (t && t.name) abbrByTeamName.set(String(t.name).toLowerCase(), t.abbr); });
 
