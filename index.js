@@ -70,6 +70,7 @@ client.once(Events.ClientReady, async c => {
   console.log(`[data] bot is reading/writing data at: ${FB}`);
   verifyWatcher.start(c);
   try { require('./scorePublisher').start(c); } catch (err) { console.error('Score publisher failed to start:', err); }
+  try { require('./offerHandler').start(c); } catch (err) { console.error('Offer sweep failed to start:', err); }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -77,6 +78,17 @@ client.on(Events.InteractionCreate, async interaction => {
     const command = client.commands.get(interaction.commandName);
     if (command && command.autocomplete) {
       try { await command.autocomplete(interaction); } catch (err) { console.error('Autocomplete error:', err); }
+    }
+    return;
+  }
+
+  // Offer Accept/Deny buttons — handled globally so they survive bot restarts.
+  if (interaction.isButton() && /^offer_(accept|deny)_\d+$/.test(interaction.customId)) {
+    try {
+      await require('./offerHandler').handleOfferButton(interaction);
+    } catch (err) {
+      console.error('Offer button error:', err);
+      try { if (!interaction.replied && !interaction.deferred) await interaction.deferUpdate(); } catch {}
     }
     return;
   }

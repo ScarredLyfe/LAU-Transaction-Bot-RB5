@@ -7,15 +7,9 @@ const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const os = require('os');
 
-// Firebase project + the key THIS bot stores its OWN data under. This is the SAME Firebase
-// database the website uses. Give each of your bots a DIFFERENT BOT_DB_KEY (e.g.
-// bot_db_transactions) so multiple bots never overwrite each other's settings.
 const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
-const DATA_KEY = process.env.DATA_API_KEY || '';
-const _wHdr = (h) => Object.assign({ 'Content-Type': 'application/json' }, DATA_KEY ? { 'X-Api-Key': DATA_KEY } : {}, h || {});
 const SNAP_KEY = process.env.BOT_DB_KEY || 'bot_db';
 
-// Local scratch cache (ephemeral — Firebase is authoritative; this is just fast working memory).
 const DB_PATH = path.join(process.env.DB_DIR || os.tmpdir(), 'league_cache.db');
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA journal_mode = WAL;');
@@ -37,8 +31,8 @@ db.exec(`
     verified_role_id TEXT,
     unverified_role_id TEXT,
     scores_channel_id TEXT,
-    media_ping_role_id TEXT,
     event_ping_role_id TEXT,
+    media_ping_role_id TEXT,
     stream_alert_role_id TEXT
   );
 
@@ -74,6 +68,24 @@ db.exec(`
     role_id TEXT NOT NULL,
     PRIMARY KEY (guild_id, position)
   );
+
+  CREATE TABLE IF NOT EXISTS pending_offers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    team_id INTEGER NOT NULL,
+    coach_id TEXT NOT NULL,
+    player_id TEXT NOT NULL,
+    dm_channel_id TEXT,
+    message_id TEXT,
+    roster_size INTEGER,
+    team_name TEXT,
+    team_emoji TEXT,
+    team_color INTEGER,
+    team_logo TEXT,
+    created_at INTEGER,
+    expires_at INTEGER,
+    status TEXT DEFAULT 'pending'
+  );
 `);
 
 // Safe migrations for existing databases (ignored if the column already exists).
@@ -85,8 +97,8 @@ addColumn('guild_settings', 'free_agent_role_id TEXT');
 addColumn('guild_settings', 'verified_role_id TEXT');
 addColumn('guild_settings', 'unverified_role_id TEXT');
 addColumn('guild_settings', 'scores_channel_id TEXT');
-addColumn('guild_settings', 'media_ping_role_id TEXT');
 addColumn('guild_settings', 'event_ping_role_id TEXT');
+addColumn('guild_settings', 'media_ping_role_id TEXT');
 addColumn('guild_settings', 'stream_alert_role_id TEXT');
 addColumn('teams', 'coach1_id TEXT');
 addColumn('teams', 'coach2_id TEXT');
@@ -106,7 +118,9 @@ function snapshot() {
 }
 async function saveToFirebase() {
   try {
-    await fetch(`${FB}/${SNAP_KEY}.json`, { method: 'PUT', headers: _wHdr(), body: JSON.stringify(snapshot()) });
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.DATA_API_KEY) headers['X-Api-Key'] = process.env.DATA_API_KEY;
+    await fetch(`${FB}/${SNAP_KEY}.json`, { method: 'PUT', headers, body: JSON.stringify(snapshot()) });
   } catch (e) { console.error('[db] save to Firebase failed', e); }
 }
 async function loadFromFirebase() {
@@ -115,12 +129,10 @@ async function loadFromFirebase() {
     const hasData = snap && typeof snap === 'object' &&
       listTables().some(t => Array.isArray(snap[t]) && snap[t].length);
     if (!hasData) {
-      // Firebase is empty for this bot → first run. Seed it from whatever the local DB has.
       console.log('[db] no Firebase snapshot yet — seeding it from local data');
       await saveToFirebase();
       return;
     }
-    // Firebase has data → it is the source of truth. Replace the local cache with it.
     for (const table of listTables()) {
       const rows = snap[table];
       if (!Array.isArray(rows)) continue;
@@ -138,7 +150,6 @@ async function loadFromFirebase() {
   } catch (e) { console.error('[db] load from Firebase failed', e); }
 }
 
-// Debounced write-through: any INSERT/UPDATE/DELETE schedules a save.
 let _saveTimer = null;
 function scheduleSave() { if (_saveTimer) clearTimeout(_saveTimer); _saveTimer = setTimeout(() => { _saveTimer = null; saveToFirebase(); }, 1500); }
 
@@ -152,11 +163,9 @@ db.prepare = function (sql) {
   return stmt;
 };
 
-// Safety net: periodic flush + best-effort flush on shutdown.
 setInterval(() => { if (!_saveTimer) saveToFirebase(); }, 60000);
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { saveToFirebase().finally(() => process.exit(0)); });
 
-// index.js should `await ready` before logging in so data is present.
 const ready = loadFromFirebase();
 
 module.exports = { db, ensureGuild, ready, saveToFirebase, loadFromFirebase };

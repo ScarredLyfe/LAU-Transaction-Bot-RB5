@@ -3,7 +3,6 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
 } = require('discord.js');
 const { db, ensureGuild } = require('../database');
-const { addPlayerToWebsiteRoster, setWebsiteDisplayName } = require('../firebaseSync');
 
 const EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -63,8 +62,23 @@ module.exports = {
     const teamRole = interaction.guild.roles.cache.get(team.role_id);
     const color = teamRole?.color || 0x5865f2;
     const teamLogo = emojiToUrl(team.emoji) || teamRole?.iconURL() || settings.bot_logo || null;
-    const expiresUnix = Math.floor((Date.now() + EXPIRY_MS) / 1000);
+    const createdAt = Date.now();
+    const expiresAt = createdAt + EXPIRY_MS;
+    const expiresUnix = Math.floor(expiresAt / 1000);
     const coach = interaction.user;
+
+    // Persist the offer FIRST so its id can be baked into the button customId. Buttons are
+    // handled by the GLOBAL InteractionCreate listener + offerHandler, so Accept/Deny keeps
+    // working even if the bot restarts before the player clicks.
+    const info = db.prepare(
+      `INSERT INTO pending_offers
+       (guild_id, team_id, coach_id, player_id, roster_size, team_name, team_emoji, team_color, team_logo, created_at, expires_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+    ).run(
+      interaction.guildId, team.id, coach.id, player.id, rosterSize,
+      team.name, team.emoji || '', color, teamLogo, createdAt, expiresAt
+    );
+    const offerId = info.lastInsertRowid;
 
     const offerEmbed = new EmbedBuilder()
       .setColor(color)
@@ -79,95 +93,21 @@ module.exports = {
     if (teamLogo) offerEmbed.setThumbnail(teamLogo);
 
     const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('accept').setLabel('Accept').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('deny').setLabel('Deny').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`offer_accept_${offerId}`).setLabel('Accept').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`offer_deny_${offerId}`).setLabel('Deny').setStyle(ButtonStyle.Danger),
     );
 
     let dm;
     try {
       dm = await player.send({ embeds: [offerEmbed], components: [buttons] });
     } catch {
+      db.prepare('UPDATE pending_offers SET status = ? WHERE id = ?').run('expired', offerId);
       return reject('I couldn\'t DM that player — they may have DMs disabled.');
     }
 
+    db.prepare('UPDATE pending_offers SET dm_channel_id = ?, message_id = ? WHERE id = ?')
+      .run(dm.channelId, dm.id, offerId);
+
     await interaction.reply({ content: `Offer sent to ${player}.`, flags: MessageFlags.Ephemeral });
-
-    const collector = dm.createMessageComponentCollector({ time: EXPIRY_MS, max: 1 });
-
-    collector.on('collect', async (i) => {
-      try {
-        await i.deferUpdate();
-
-        const disabledRow = new ActionRowBuilder().addComponents(
-          ButtonBuilder.from(buttons.components[0]).setDisabled(true),
-          ButtonBuilder.from(buttons.components[1]).setDisabled(true),
-        );
-
-        if (i.customId === 'accept') {
-          const nowCount = db.prepare(
-            'SELECT COUNT(*) AS c FROM players WHERE guild_id = ? AND team_id = ?'
-          ).get(interaction.guildId, team.id).c;
-          if (nowCount >= rosterSize) {
-            await i.editReply({ content: 'This team\'s roster filled up before you accepted.', embeds: [], components: [] });
-            return;
-          }
-
-          db.prepare(
-            `INSERT INTO players (guild_id, user_id, team_id) VALUES (?, ?, ?)
-             ON CONFLICT(guild_id, user_id) DO UPDATE SET team_id = excluded.team_id`
-          ).run(interaction.guildId, player.id, team.id);
-
-          await playerMember.roles.add(team.role_id).catch(() => {});
-          if (settings.signed_role_id) await playerMember.roles.add(settings.signed_role_id).catch(() => {});
-          if (settings.free_agent_role_id) await playerMember.roles.remove(settings.free_agent_role_id).catch(() => {});
-
-          // ── Website sync: add to the team's roster + store their Discord name ──
-          addPlayerToWebsiteRoster(team.name, player.id).catch(() => {});
-          setWebsiteDisplayName(player.id, playerMember).catch(() => {});
-
-          await i.editReply({ embeds: [offerEmbed.setDescription(`✅ You accepted the offer from ${team.name}.`)], components: [disabledRow] });
-
-          const newCount = nowCount + 1;
-          const acceptEmbed = new EmbedBuilder()
-            .setColor(color)
-            .setAuthor({ name: interaction.guild.name, iconURL: interaction.guild.iconURL() || undefined })
-            .setTitle('✅ Transaction Complete ✅')
-            .setDescription(
-              `${player} \`${player.username}\` has accepted the offer from ${team.emoji}\n\n` +
-              `> 📁 Roster: ${newCount}/${rosterSize}\n` +
-              `> 💼 Coach: ${coach}`
-            )
-            .setTimestamp();
-          if (teamLogo) acceptEmbed.setThumbnail(teamLogo);
-
-          try {
-            const channel = await interaction.guild.channels.fetch(settings.transaction_channel_id);
-            await channel.send({ embeds: [acceptEmbed], allowedMentions: { users: [player.id] } });
-          } catch {}
-        }
-
-        if (i.customId === 'deny') {
-          await i.editReply({ embeds: [offerEmbed.setDescription('❌ You declined the offer.')], components: [disabledRow] });
-
-          const declineEmbed = new EmbedBuilder()
-            .setColor(0xed4245)
-            .setTitle('Offer Declined')
-            .setDescription(`${player} \`${playerMember.displayName}\` has declined your offer.`);
-          await coach.send({ embeds: [declineEmbed] }).catch(() => {});
-        }
-      } catch (err) {
-        console.error('Offer button error:', err);
-      }
-    });
-
-    collector.on('end', async (collected) => {
-      if (collected.size === 0) {
-        const expiredRow = new ActionRowBuilder().addComponents(
-          ButtonBuilder.from(buttons.components[0]).setDisabled(true),
-          ButtonBuilder.from(buttons.components[1]).setDisabled(true),
-        );
-        dm.edit({ components: [expiredRow] }).catch(() => {});
-      }
-    });
   },
 };
