@@ -180,9 +180,143 @@ async function setWebsiteDisplayName(discordId, member) {
   } catch (e) { console.error('[sync] setWebsiteDisplayName failed', e); return { ok: false }; }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BULK SYNC
+//
+// The per-player helpers above each re-resolve the season, re-download playerdb and
+// team_defs, then read-modify-write the whole season object. That's ~6 HTTP round-trips
+// PER PLAYER, and /sync calls them in a sequential loop for every rostered member, every
+// staff member, and every nickname. On a mid-size server that's 1,000+ sequential requests
+// taking several minutes — long enough that the Discord interaction token expires and the
+// final editReply fails with "Unknown Webhook", so the command appears to do nothing even
+// while it's still churning in the background.
+//
+// This does the same work with a fixed ~6 requests total, regardless of member count:
+// read each source once, compute the entire result in memory, write each destination once.
+// ─────────────────────────────────────────────────────────────────────────────
+async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [] }) {
+  const result = {
+    ok: false, reason: null,
+    seasonId: null, rostered: 0, staff: 0, names: 0,
+    unregistered: [], unknownTeams: [],
+  };
+
+  const sid = await activeSeasonId();
+  if (sid == null) {
+    result.reason = 'no-active-season';
+    console.log('[sync] ABORT bulk: no active season — bot writes nowhere');
+    return result;
+  }
+  result.seasonId = sid;
+
+  // ── Read every source exactly once ──
+  let playerdb = null, teamDefs = null, season = null;
+  try { playerdb = await (await fetch(`${FB}/data/playerdb.json`)).json(); } catch (e) { console.error('[sync] playerdb fetch failed', e); }
+  try { teamDefs = await (await fetch(`${FB}/data/team_defs.json`)).json(); } catch (e) { console.error('[sync] team_defs fetch failed', e); }
+  try { season   = await loadSeasonRosters(sid); } catch (e) { console.error('[sync] season fetch failed', e); }
+
+  if (!Array.isArray(playerdb)) { result.reason = 'playerdb-unavailable'; return result; }
+  if (!Array.isArray(teamDefs)) { result.reason = 'team-defs-unavailable'; return result; }
+  season = (season && typeof season === 'object') ? season : {};
+
+  // ── Build in-memory lookups ──
+  const nameByDiscord = new Map();
+  playerdb.forEach(p => { if (p && p.discordId) nameByDiscord.set(String(p.discordId), p.name || null); });
+  const abbrByTeamName = new Map();
+  teamDefs.forEach(t => { if (t && t.name) abbrByTeamName.set(String(t.name).toLowerCase(), t.abbr); });
+
+  // ── Rosters: rebuild from scratch for the teams we know about ──
+  // Only teams that actually appear in rosterJobs are reset, so a team whose Discord role
+  // was deleted (or that nobody currently holds) keeps whatever the site already had
+  // rather than being silently emptied.
+  const rosters = (season.rosters && typeof season.rosters === 'object') ? season.rosters : {};
+  const touchedAbbrs = new Set();
+  const resolved = []; // [abbr, playerName, discordId]
+
+  for (const [teamName, discordId] of rosterJobs) {
+    const abbr = abbrByTeamName.get(String(teamName || '').toLowerCase());
+    if (!abbr) { if (!result.unknownTeams.includes(teamName)) result.unknownTeams.push(teamName); continue; }
+    const playerName = nameByDiscord.get(String(discordId));
+    if (!playerName) { result.unregistered.push(discordId); continue; }
+    touchedAbbrs.add(abbr);
+    resolved.push([abbr, playerName, discordId]);
+  }
+
+  touchedAbbrs.forEach(abbr => { rosters[abbr] = []; });
+  const placed = new Set(); // lowercased name -> already placed (a player belongs to one team)
+  for (const [abbr, playerName] of resolved) {
+    const key = playerName.toLowerCase();
+    if (placed.has(key)) continue;
+    // A player should never sit on two rosters at once, so drop them from any other team.
+    for (const t of Object.keys(rosters)) {
+      if (t === abbr || !Array.isArray(rosters[t])) continue;
+      rosters[t] = rosters[t].filter(n => String(n || '').toLowerCase() !== key);
+    }
+    rosters[abbr].push(playerName);
+    placed.add(key);
+    result.rostered++;
+  }
+  season.rosters = rosters;
+
+  // ── Staff roles: same idea, reset only the teams we're syncing ──
+  const staffRoles = (season.staffRoles && typeof season.staffRoles === 'object') ? season.staffRoles : {};
+  touchedAbbrs.forEach(abbr => { staffRoles[abbr] = {}; });
+  for (const [teamName, discordId, slot, roleName] of staffJobs) {
+    const abbr = abbrByTeamName.get(String(teamName || '').toLowerCase());
+    const playerName = nameByDiscord.get(String(discordId));
+    if (!abbr || !playerName || !roleName) continue;
+    if (!staffRoles[abbr]) staffRoles[abbr] = {};
+    const sr = staffRoles[abbr];
+    // One person holds one slot per team — clear any other slot they were sitting in.
+    for (const s of ['owner', 'gm', 'hc']) {
+      if (sr[s] && String(sr[s].name || '').toLowerCase() === playerName.toLowerCase()) delete sr[s];
+    }
+    sr[slot] = { name: playerName, role: roleName };
+    result.staff++;
+  }
+  season.staffRoles = staffRoles;
+
+  // ── Display names: mutate the array we already have, write it once ──
+  let nameChanged = false;
+  const idxByDiscord = new Map();
+  playerdb.forEach((p, i) => { if (p && p.discordId) idxByDiscord.set(String(p.discordId), i); });
+  for (const [discordId, displayName] of nameJobs) {
+    if (!displayName) continue;
+    const i = idxByDiscord.get(String(discordId));
+    if (i == null) continue;               // not registered on the site — nothing to attach to
+    if (playerdb[i].displayName === displayName) continue;  // already correct
+    playerdb[i].displayName = displayName;
+    nameChanged = true;
+    result.names++;
+  }
+
+  // ── Write each destination exactly once ──
+  try {
+    await saveSeasonRosters(sid, season);
+  } catch (e) {
+    console.error('[sync] season write failed', e);
+    result.reason = 'season-write-failed';
+    return result;
+  }
+  if (nameChanged) {
+    try {
+      await fetch(`${FB}/data/playerdb.json`, { method: 'PUT', headers: _wHdr(), body: JSON.stringify(playerdb) });
+    } catch (e) {
+      console.error('[sync] playerdb write failed', e);
+      result.reason = 'playerdb-write-failed';
+      return result;
+    }
+  }
+
+  result.ok = true;
+  console.log(`[sync] bulk done: season=${sid} rostered=${result.rostered} staff=${result.staff} names=${result.names}`);
+  return result;
+}
+
 module.exports = {
   addPlayerToWebsiteRoster,
   removePlayerFromWebsiteRoster,
   setWebsiteStaffRole,
   setWebsiteDisplayName,
+  bulkSyncToWebsite,
 };
