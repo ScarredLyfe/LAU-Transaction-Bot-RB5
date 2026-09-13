@@ -74,5 +74,9 @@ module.exports = {
     }
 
     await interaction.editReply(`✅ Disbanded **${team.name}** and released ${releasedNames.length} player${releasedNames.length === 1 ? '' : 's'}.`);
+
+    // Refresh the franchise board immediately -- the AD just changed, no need to wait up to
+    // an hour for the next scheduled refresh.
+    try { await require('../franchiseBoard').postFranchiseBoard(interaction.client, interaction.guildId); } catch (e) {}
   },
 };

@@ -71,6 +71,7 @@ client.once(Events.ClientReady, async c => {
   verifyWatcher.start(c);
   try { require('./scorePublisher').start(c); } catch (err) { console.error('Score publisher failed to start:', err); }
   try { require('./offerHandler').start(c); } catch (err) { console.error('Offer sweep failed to start:', err); }
+  try { require('./franchiseBoard').start(c); } catch (err) { console.error('Franchise board failed to start:', err); }
 });
 
 client.on(Events.InteractionCreate, async interaction => {

@@ -91,5 +91,9 @@ module.exports = {
       const channel = await interaction.guild.channels.fetch(settings.transaction_channel_id);
       if (channel) await channel.send({ embeds: [embed], allowedMentions: { users: [user.id] } });
     } catch {}
+
+    // Refresh the franchise board immediately -- the AD just changed, no need to wait up to
+    // an hour for the next scheduled refresh.
+    try { await require('../franchiseBoard').postFranchiseBoard(interaction.client, interaction.guildId); } catch (e) {}
   },
 };
