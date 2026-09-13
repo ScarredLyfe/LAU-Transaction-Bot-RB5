@@ -198,7 +198,7 @@ async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [
   const result = {
     ok: false, reason: null,
     seasonId: null, rostered: 0, staff: 0, names: 0,
-    unregistered: [], unknownTeams: [],
+    unregistered: [], noProfile: [], unknownTeams: [],
   };
 
   const sid = await activeSeasonId();
@@ -210,10 +210,14 @@ async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [
   result.seasonId = sid;
 
   // ── Read every source exactly once ──
-  let playerdb = null, teamDefs = null, season = null;
+  let playerdb = null, teamDefs = null, season = null, accounts = null;
   try { playerdb = await (await fetch(`${FB}/data/playerdb.json`)).json(); } catch (e) { console.error('[sync] playerdb fetch failed', e); }
   try { teamDefs = await (await fetch(`${FB}/data/team_defs.json`)).json(); } catch (e) { console.error('[sync] team_defs fetch failed', e); }
   try { season   = await loadSeasonRosters(sid); } catch (e) { console.error('[sync] season fetch failed', e); }
+  // accounts.json is the other place a linked account can live. A player counts as
+  // registered only if they have a robloxId actually attached -- a half-finished entry
+  // with a discordId and no robloxId can't be matched to anything on the site.
+  try { accounts = await (await fetch(`${FB}/accounts.json`)).json(); } catch (e) { console.error('[sync] accounts fetch failed', e); }
 
   if (!Array.isArray(playerdb)) { result.reason = 'playerdb-unavailable'; return result; }
   if (!Array.isArray(teamDefs)) { result.reason = 'team-defs-unavailable'; return result; }
@@ -224,6 +228,15 @@ async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [
   playerdb.forEach(p => { if (p && p.discordId) nameByDiscord.set(String(p.discordId), p.name || null); });
   const abbrByTeamName = new Map();
   teamDefs.forEach(t => { if (t && t.name) abbrByTeamName.set(String(t.name).toLowerCase(), t.abbr); });
+
+  // Same definition of "registered" the verify button and the website itself use:
+  // a linked entry in EITHER accounts or playerdb that carries a non-empty robloxId.
+  const registeredIds = new Set();
+  const collect = (o) => {
+    if (o && o.discordId && String(o.robloxId || '').trim()) registeredIds.add(String(o.discordId));
+  };
+  if (accounts && typeof accounts === 'object') Object.values(accounts).forEach(collect);
+  if (Array.isArray(playerdb)) playerdb.forEach(collect);
 
   // ── Rosters: rebuild from scratch for the teams we know about ──
   // Only teams that actually appear in rosterJobs are reset, so a team whose Discord role
@@ -236,8 +249,20 @@ async function bulkSyncToWebsite({ rosterJobs = [], staffJobs = [], nameJobs = [
   for (const [teamName, discordId] of rosterJobs) {
     const abbr = abbrByTeamName.get(String(teamName || '').toLowerCase());
     if (!abbr) { if (!result.unknownTeams.includes(teamName)) result.unknownTeams.push(teamName); continue; }
+
+    // Anyone holding a team role without a linked website account is flagged here, with the
+    // team they're on, so the caller can DM them. Carrying the team name through avoids a
+    // second lookup and lets the DM name their team.
+    if (!registeredIds.has(String(discordId))) {
+      result.unregistered.push({ discordId: String(discordId), teamName });
+      continue;
+    }
+
     const playerName = nameByDiscord.get(String(discordId));
-    if (!playerName) { result.unregistered.push(discordId); continue; }
+    // Registered (has a robloxId) but no playerdb row to read a name from -- nothing to put
+    // on the roster, but they don't need a "go register" DM either.
+    if (!playerName) { result.noProfile.push(String(discordId)); continue; }
+
     touchedAbbrs.add(abbr);
     resolved.push([abbr, playerName, discordId]);
   }

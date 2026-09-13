@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags, EmbedBuilder } = require('discord.js');
 const { db, ensureGuild } = require('../database');
 const { bulkSyncToWebsite } = require('../firebaseSync');
 
@@ -7,11 +7,20 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('sync')
     .setDescription('Rebuild rosters from current Discord roles and refresh the website')
+    .addBooleanOption(o => o
+      .setName('notify')
+      .setDescription('DM rostered players who have no website account (default: true)')
+      .setRequired(false))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction) {
     ensureGuild(interaction.guildId);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // Default to notifying, but allow it to be turned off so a follow-up /sync run doesn't
+    // DM the same people over and over while an admin is fixing something else.
+    const notify = interaction.options.getBoolean('notify');
+    const shouldNotify = notify === null ? true : notify;
 
     const teams = db.prepare('SELECT * FROM teams WHERE guild_id = ?').all(interaction.guildId);
     if (teams.length === 0) return interaction.editReply('No teams are registered yet.');
@@ -90,7 +99,7 @@ module.exports = {
       );
     }
 
-    // Report honestly when nothing reached the website — the old version always claimed
+    // Report honestly when nothing reached the website -- the old version always claimed
     // success even when every write had silently been skipped.
     if (!res.ok) {
       const why = {
@@ -105,16 +114,62 @@ module.exports = {
       );
     }
 
+    // ── DM anyone on a roster with no linked website account ──
+    const base = (process.env.WEBSITE_URL || 'https://laurb5.com').replace(/\/+$/, '');
+    let dmSent = 0, dmFailed = 0;
+    const dmFailedMentions = [];
+
+    if (shouldNotify && res.unregistered.length) {
+      for (const { discordId, teamName } of res.unregistered) {
+        const embed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('⚠️ Registration Required')
+          .setDescription(
+            `You are on a roster but cannot play because you aren't registered on the website.\n\n` +
+            `Team: **${teamName}**\n\n` +
+            `Register here: ${base}\n\n` +
+            `Sign in with Discord and link your Roblox account. Once that's done, click the ` +
+            `**Verify** button in the server to get your roles, and your stats will start ` +
+            `showing up on your player page.`
+          );
+        try {
+          // members is already fetched above, so this is a cache hit -- no extra API call.
+          const member = members.get(discordId) || await interaction.guild.members.fetch(discordId).catch(() => null);
+          if (!member) { dmFailed++; continue; }
+          await member.send({ embeds: [embed] });
+          dmSent++;
+        } catch (e) {
+          // Almost always "Cannot send messages to this user" -- DMs closed or bot blocked.
+          dmFailed++;
+          dmFailedMentions.push(`<@${discordId}>`);
+        }
+      }
+    }
+
     let msg =
       `✅ Synced **${res.rostered}** roster spot${res.rostered === 1 ? '' : 's'} across ${teams.length} team${teams.length === 1 ? '' : 's'}, ` +
       `refreshed **${res.staff}** coach role${res.staff === 1 ? '' : 's'}, and updated **${res.names}** Discord nickname${res.names === 1 ? '' : 's'} on the website (season ${res.seasonId}).`;
 
     if (res.unregistered.length) {
-      msg += `\n\n⚠️ ${res.unregistered.length} player${res.unregistered.length === 1 ? ' has' : 's have'} a team role but no website profile, so they couldn't be added to a roster: ` +
-             res.unregistered.slice(0, 10).map(id => `<@${id}>`).join(', ') +
-             (res.unregistered.length > 10 ? ` and ${res.unregistered.length - 10} more` : '') +
-             `. They need to link their account on the website first.`;
+      msg += `\n\n⚠️ **${res.unregistered.length}** player${res.unregistered.length === 1 ? ' is' : 's are'} on a roster but not registered on the website, so they couldn't be added.`;
+      if (shouldNotify) {
+        msg += `\n✅ DMed: ${dmSent}`;
+        if (dmFailed) {
+          msg += `\n❌ Couldn't DM (DMs closed or bot blocked): ${dmFailed}`;
+          if (dmFailedMentions.length) msg += `\n${dmFailedMentions.slice(0, 20).join(', ')}`;
+          if (dmFailedMentions.length > 20) msg += ` and ${dmFailedMentions.length - 20} more`;
+        }
+      } else {
+        msg += `\nDMs skipped (notify: false): ` +
+               res.unregistered.slice(0, 20).map(u => `<@${u.discordId}>`).join(', ') +
+               (res.unregistered.length > 20 ? ` and ${res.unregistered.length - 20} more` : '');
+      }
     }
+
+    if (res.noProfile.length) {
+      msg += `\n\nℹ️ ${res.noProfile.length} player${res.noProfile.length === 1 ? ' has' : 's have'} a linked account but no player profile yet, so no roster spot was written for them.`;
+    }
+
     if (res.unknownTeams.length) {
       msg += `\n\n⚠️ No website team matches ${res.unknownTeams.length === 1 ? 'this team name' : 'these team names'}: ` +
              res.unknownTeams.map(t => `\`${t}\``).join(', ') +
