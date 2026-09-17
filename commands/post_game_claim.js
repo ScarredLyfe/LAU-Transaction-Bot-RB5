@@ -8,7 +8,7 @@ module.exports = {
     .addRoleOption(o => o.setName('away_team').setDescription('Away team role').setRequired(true))
     .addRoleOption(o => o.setName('home_team').setDescription('Home team role').setRequired(true))
     .addStringOption(o => o.setName('time').setDescription('Game time (e.g. 8:00 PM EST)').setRequired(true))
-    .addBooleanOption(o => o.setName('primetime').setDescription('Mark this as a Primetime game').setRequired(false))
+    .addBooleanOption(o => o.setName('primetime').setDescription('Is this a Primetime game?').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction) {
@@ -32,7 +32,7 @@ module.exports = {
     const awayRole = interaction.options.getRole('away_team');
     const homeRole = interaction.options.getRole('home_team');
     const time = interaction.options.getString('time');
-    const primetime = interaction.options.getBoolean('primetime') || false;
+    const primetime = interaction.options.getBoolean('primetime');
 
     // Persist the claim row FIRST so its id can be baked into the button customId -- same
     // reasoning as offers: the click handler (in index.js, always running) looks everything
