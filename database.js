@@ -1,6 +1,6 @@
 // Firebase-backed database layer.
 // Keeps the SAME synchronous db.prepare().get/all/run API every command already uses,
-// but the source of truth is FIREBASE — data is loaded into a tiny local SQLite cache on
+// but the source of truth is FIREBASE -- data is loaded into a tiny local SQLite cache on
 // startup and written back to Firebase whenever anything changes. Nothing important lives
 // on the server's disk, so the bot can run on any host (even ones that wipe storage).
 const { DatabaseSync } = require('node:sqlite');
@@ -37,7 +37,10 @@ db.exec(`
     media_ping_role_id TEXT,
     stream_alert_role_id TEXT,
     franchise_channel_id TEXT,
-    franchise_message_id TEXT
+    franchise_message_id TEXT,
+    referee_role_id TEXT,
+    streamer_role_id TEXT,
+    game_claims_channel_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS teams (
@@ -90,6 +93,29 @@ db.exec(`
     expires_at INTEGER,
     status TEXT DEFAULT 'pending'
   );
+
+  CREATE TABLE IF NOT EXISTS game_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    away_role_id TEXT NOT NULL,
+    home_role_id TEXT NOT NULL,
+    time_text TEXT,
+    primetime INTEGER DEFAULT 0,
+    referee_id TEXT,
+    web_streamer_id TEXT,
+    discord_streamer_id TEXT,
+    locked INTEGER DEFAULT 0,
+    created_at INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS claim_stats (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    referee_games INTEGER DEFAULT 0,
+    web_streamer_games INTEGER DEFAULT 0,
+    discord_streamer_games INTEGER DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+  );
 `);
 
 // Safe migrations for existing databases (ignored if the column already exists).
@@ -106,6 +132,9 @@ addColumn('guild_settings', 'media_ping_role_id TEXT');
 addColumn('guild_settings', 'stream_alert_role_id TEXT');
 addColumn('guild_settings', 'franchise_channel_id TEXT');
 addColumn('guild_settings', 'franchise_message_id TEXT');
+addColumn('guild_settings', 'referee_role_id TEXT');
+addColumn('guild_settings', 'streamer_role_id TEXT');
+addColumn('guild_settings', 'game_claims_channel_id TEXT');
 addColumn('teams', 'coach1_id TEXT');
 addColumn('teams', 'coach2_id TEXT');
 
