@@ -9,7 +9,6 @@ const verifyWatcher = require('./verifyWatcher');
 const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://laurb5.com';
 
-// Is this Discord user fully registered on the website (discordId + robloxId both linked)?
 async function isRegistered(discordId) {
   console.log(`[verify-btn] checking registration for ${discordId} against ${FB}`);
   try {
@@ -50,7 +49,6 @@ for (const file of fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'))) 
   }
 }
 
-// Auto-register all slash commands on startup, so any command change goes live on deploy.
 client.once(Events.ClientReady, async c => {
   console.log(`Logged in as ${c.user.tag}`);
   try {
@@ -74,10 +72,10 @@ client.once(Events.ClientReady, async c => {
   try { require('./scorePublisher').start(c); } catch (err) { console.error('Score publisher failed to start:', err); }
   try { require('./offerHandler').start(c); } catch (err) { console.error('Offer sweep failed to start:', err); }
   try { require('./franchiseBoard').start(c); } catch (err) { console.error('Franchise board failed to start:', err); }
+  try { require('./nameSyncWatcher').start(c); } catch (err) { console.error('Name sync watcher failed to start:', err); }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
-  // Autocomplete (e.g. /promote coach picker showing live role names)
   if (interaction.isAutocomplete()) {
     const command = client.commands.get(interaction.commandName);
     if (command && command.autocomplete) {
@@ -86,7 +84,6 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  // Offer Accept/Deny buttons — handled globally so they survive bot restarts.
   if (interaction.isButton() && /^offer_(accept|deny)_\d+$/.test(interaction.customId)) {
     try {
       await require('./offerHandler').handleOfferButton(interaction);
@@ -97,8 +94,6 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  // Game claim buttons (Referee / Web Streamer / Discord Streamer / Lock / Force Drops) —
-  // handled globally, same durable reasoning as offers.
   if (interaction.isButton() && /^claim_(ref|webstream|discordstream|lock|forceref|forcewebstream|forcediscordstream)_\d+$/.test(interaction.customId)) {
     try {
       await require('./gameClaimHandler').handleClaimButton(interaction);
@@ -109,14 +104,12 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  // Verify button on the verification panel
   if (interaction.isButton() && interaction.customId === 'verify_btn') {
     try {
       const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(interaction.guildId);
       const registered = await isRegistered(interaction.user.id);
 
       if (registered) {
-        // Already registered on the website → grant roles right now.
         const member = interaction.member;
         const toAdd = [];
         if (settings && settings.verified_role_id)   toAdd.push(settings.verified_role_id);
@@ -129,8 +122,6 @@ client.on(Events.InteractionCreate, async interaction => {
         } catch (e) { console.error('[verify] button remove unverified failed', e); }
         await interaction.reply({ content: '✅ You\'re verified! You now have access to the rest of the server.', flags: 1 << 6 });
       } else {
-        // Not registered yet → send them to the website. The watcher will role them
-        // automatically within a few seconds of finishing registration.
         await interaction.reply({
           content: `You're not registered yet. Head to ${WEBSITE_URL} and link your Discord + Roblox to register.\n\nOnce you're done, you'll be verified automatically — or just click **Verify** again.`,
           flags: 1 << 6,
@@ -159,8 +150,6 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-// Auto-update the website display name whenever someone's server nickname changes,
-// so player profile names on the site always match their Discord server name.
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   try {
     const oldName = oldMember.nickname || (oldMember.user && oldMember.user.globalName) || (oldMember.user && oldMember.user.username);
@@ -173,7 +162,6 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   }
 });
 
-// Give new members the unverified role automatically until they register.
 client.on(Events.GuildMemberAdd, async member => {
   try {
     const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(member.guild.id);
@@ -189,7 +177,6 @@ client.on('error', err => console.error('Client error:', err));
 process.on('unhandledRejection', err => console.error('Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('Uncaught exception:', err));
 
-// Wait for the initial data load from Firebase, then log in.
 (async () => {
   try { await ready; } catch (e) { console.error('[db] initial load error', e); }
   client.login(process.env.DISCORD_TOKEN);
