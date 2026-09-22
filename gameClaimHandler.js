@@ -19,16 +19,27 @@ const SLOTS = [
   { kind: 'discordstream',  field: 'discord_streamer_id',  statCol: 'discord_streamer_games',   label: 'Discord Streamer',roleSetting: 'streamer_role_id' },
 ];
 
-// claim_stats tracks each person's running total of games actually worked. Only incremented
-// when a game is LOCKED (confirmed to have happened) -- see the lock branch below -- not at
-// claim time, and only decremented if a lock is later undone.
+// Games-worked totals are counted straight from the locked claims themselves, not from
+// running counters. Counters split streaming into two separate numbers (web vs Discord), so
+// someone who web streamed one game and Discord streamed another saw "1 Game" on each instead
+// of the 2 they actually streamed. Counting locked game_claims rows directly gives the real
+// total, counts doing BOTH streams on the same game as one game streamed, and can never drift
+// out of sync after an unlock/relock -- there's no counter to forget to reverse.
+// (claim_stats is still updated below for backward compatibility, but nothing displays it.)
 function bumpStat(guildId, userId, column, delta) {
   db.prepare('INSERT OR IGNORE INTO claim_stats (guild_id, user_id) VALUES (?, ?)').run(guildId, userId);
   db.prepare(`UPDATE claim_stats SET ${column} = MAX(0, ${column} + ?) WHERE guild_id = ? AND user_id = ?`).run(delta, guildId, userId);
 }
-function getStat(guildId, userId, column) {
-  const row = db.prepare(`SELECT ${column} AS v FROM claim_stats WHERE guild_id = ? AND user_id = ?`).get(guildId, userId);
-  return row ? row.v : 0;
+function gamesReffed(guildId, userId) {
+  return db.prepare(
+    'SELECT COUNT(*) AS n FROM game_claims WHERE guild_id = ? AND locked = 1 AND referee_id = ?'
+  ).get(guildId, userId).n;
+}
+function gamesStreamed(guildId, userId) {
+  // Either streaming role counts; the OR means a game where they did both counts once.
+  return db.prepare(
+    'SELECT COUNT(*) AS n FROM game_claims WHERE guild_id = ? AND locked = 1 AND (web_streamer_id = ? OR discord_streamer_id = ?)'
+  ).get(guildId, userId, userId).n;
 }
 
 function buildEmbed(claim, awayMention, homeMention) {
@@ -40,8 +51,9 @@ function buildEmbed(claim, awayMention, homeMention) {
   for (const slot of SLOTS) {
     const holderId = claim[slot.field];
     if (holderId) {
-      const n = getStat(claim.guild_id, holderId, slot.statCol);
-      lines.push(`**${slot.label}:** <@${holderId}> - ${n} Game${n === 1 ? '' : 's'}`);
+      const isRef = slot.kind === 'ref';
+      const n = isRef ? gamesReffed(claim.guild_id, holderId) : gamesStreamed(claim.guild_id, holderId);
+      lines.push(`**${slot.label}:** <@${holderId}> - ${n} Game${n === 1 ? '' : 's'} ${isRef ? 'Reffed' : 'Streamed'}`);
     } else {
       lines.push(`**${slot.label}:** Unclaimed`);
     }
@@ -93,6 +105,11 @@ async function handleClaimButton(interaction) {
   if (!claim) return;
 
   if (kind === 'lock') {
+    // Toggles both ways. Locking is also what actually confirms the game happened, so THIS
+    // is when each stat column gets incremented for whoever currently holds that slot -- not
+    // at claim time. Claiming a slot no longer bumps the stat by itself, since a
+    // claimed-but-never-locked game (cancelled, swapped out, etc.) shouldn't have counted
+    // toward anyone's total just because they clicked. Unlocking reverses the same increment.
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
       try { await interaction.followUp({ content: `Only a server manager can ${claim.locked ? 'unlock' : 'lock'} this.`, flags: MessageFlags.Ephemeral }); } catch {}
       return;
@@ -105,6 +122,9 @@ async function handleClaimButton(interaction) {
     }
 
   } else if (kind.startsWith('force')) {
+    // ── Server-manager-only force drop -- always requires Manage Server, regardless of who
+    // holds the slot. Only reachable while unlocked (the button is disabled once locked), so
+    // the slot was never counted toward anyone's total yet -- nothing to reverse here.
     const slot = SLOTS.find(s => `force${s.kind}` === kind);
     if (!slot) return;
     if (claim.locked) {
@@ -116,7 +136,7 @@ async function handleClaimButton(interaction) {
       return;
     }
     const currentHolder = claim[slot.field];
-    if (!currentHolder) return;
+    if (!currentHolder) return; // nothing to drop -- button should be disabled anyway
     const result = db.prepare(`UPDATE game_claims SET ${slot.field} = NULL WHERE id = ? AND ${slot.field} = ?`).run(claimId, currentHolder);
     if (result.changes === 0) return;
 
@@ -131,6 +151,9 @@ async function handleClaimButton(interaction) {
     }
 
     if (currentHolder) {
+      // ── DROP ── self-only. A server manager who needs to free a stuck slot uses the
+      // separate Force Drop button instead. Only reachable while unlocked, so this claim
+      // was never counted toward their total yet -- nothing to reverse here.
       if (currentHolder !== interaction.user.id) {
         try {
           await interaction.followUp({
@@ -143,8 +166,11 @@ async function handleClaimButton(interaction) {
       const result = db.prepare(
         `UPDATE game_claims SET ${slot.field} = NULL WHERE id = ? AND ${slot.field} = ?`
       ).run(claimId, currentHolder);
-      if (result.changes === 0) return;
+      if (result.changes === 0) return; // state already changed under us -- nothing to do
     } else {
+      // ── CLAIM ── requires the configured role, if one is set for this server. Claiming
+      // itself doesn't touch the stat column anymore -- that only happens when the game is
+      // actually locked (confirmed).
       const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(claim.guild_id);
       const requiredRoleId = settings ? settings[slot.roleSetting] : null;
       if (requiredRoleId && !interaction.member.roles.cache.has(requiredRoleId)) {
@@ -156,6 +182,8 @@ async function handleClaimButton(interaction) {
         } catch {}
         return;
       }
+      // Atomic claim: only succeeds if the field is still NULL at this exact moment -- if
+      // two people click within the same instant, only the first actually wins the slot.
       const result = db.prepare(
         `UPDATE game_claims SET ${slot.field} = ? WHERE id = ? AND ${slot.field} IS NULL`
       ).run(interaction.user.id, claimId);
@@ -177,4 +205,4 @@ async function handleClaimButton(interaction) {
   await interaction.editReply({ embeds: [embed], components: rows });
 }
 
-module.exports = { handleClaimButton, buildEmbed, buildButtons, SLOTS };
+module.exports = { handleClaimButton, buildEmbed, buildButtons, SLOTS, gamesReffed, gamesStreamed };
