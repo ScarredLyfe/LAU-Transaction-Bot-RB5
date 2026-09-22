@@ -3,6 +3,7 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
 } = require('discord.js');
 const { db, ensureGuild } = require('../database');
+const { fetchMembersCached } = require('../memberCache');
 
 const EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -52,9 +53,18 @@ module.exports = {
     }
 
     const rosterSize = settings.roster_size;
-    const rosterCount = db.prepare(
-      'SELECT COUNT(*) AS c FROM players WHERE guild_id = ? AND team_id = ?'
-    ).get(interaction.guildId, team.id).c;
+    // Count only players who are BOTH still in the database as this team's roster AND
+    // currently hold the team's Discord role -- not just the database alone. If someone's
+    // team role was ever removed outside of /release (an admin stripping it by hand, a role
+    // mixup, etc.), the database row can keep counting them long after they're actually gone,
+    // silently blocking every future offer even though the roster looks well under cap in
+    // Discord. This is the same live-role check /roster already uses, for the same reason.
+    const rosterRows = db.prepare('SELECT user_id FROM players WHERE guild_id = ? AND team_id = ?').all(interaction.guildId, team.id);
+    const members = await fetchMembersCached(interaction.guild).catch(() => interaction.guild.members.cache);
+    const rosterCount = rosterRows.filter(r => {
+      const m = members.get(r.user_id);
+      return m && m.roles.cache.has(team.role_id);
+    }).length;
     if (rosterCount >= rosterSize) {
       return reject(`Your roster is full (${rosterCount}/${rosterSize}).`);
     }
@@ -68,8 +78,10 @@ module.exports = {
     const coach = interaction.user;
 
     // Persist the offer FIRST so its id can be baked into the button customId. Buttons are
-    // handled by the GLOBAL InteractionCreate listener + offerHandler, so Accept/Deny keeps
-    // working even if the bot restarts before the player clicks.
+    // handled by the GLOBAL InteractionCreate listener + offerHandler, looking the offer up
+    // from this row -- so Accept/Deny keeps working even if the bot restarts before the player
+    // clicks. (The old version used an in-memory collector that died on every restart, which
+    // is why offers "sometimes worked, sometimes didn't.")
     const info = db.prepare(
       `INSERT INTO pending_offers
        (guild_id, team_id, coach_id, player_id, roster_size, team_name, team_emoji, team_color, team_logo, created_at, expires_at, status)
@@ -102,7 +114,7 @@ module.exports = {
       dm = await player.send({ embeds: [offerEmbed], components: [buttons] });
     } catch {
       db.prepare('UPDATE pending_offers SET status = ? WHERE id = ?').run('expired', offerId);
-      return reject('I couldn\'t DM that player — they may have DMs disabled.');
+      return reject('I couldn\'t DM that player -- they may have DMs disabled.');
     }
 
     db.prepare('UPDATE pending_offers SET dm_channel_id = ?, message_id = ? WHERE id = ?')
