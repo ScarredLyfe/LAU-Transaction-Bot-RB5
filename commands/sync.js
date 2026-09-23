@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags, EmbedBuilder } = require('discord.js');
 const { db, ensureGuild } = require('../database');
 const { bulkSyncToWebsite } = require('../firebaseSync');
+const { fetchMembersCached } = require('../memberCache');
 
 // coach_1 -> GM slot on the website, coach_2 -> HC slot on the website.
 module.exports = {
@@ -17,6 +18,8 @@ module.exports = {
     ensureGuild(interaction.guildId);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+    // Default to notifying, but allow it to be turned off so a follow-up /sync run doesn't
+    // DM the same people over and over while an admin is fixing something else.
     const notify = interaction.options.getBoolean('notify');
     const shouldNotify = notify === null ? true : notify;
 
@@ -27,7 +30,13 @@ module.exports = {
     const coach1Role = db.prepare("SELECT role_id FROM coach_roles WHERE guild_id = ? AND position = 'coach_1'").get(interaction.guildId)?.role_id;
     const coach2Role = db.prepare("SELECT role_id FROM coach_roles WHERE guild_id = ? AND position = 'coach_2'").get(interaction.guildId)?.role_id;
 
-    const members = await interaction.guild.members.fetch();
+    // Pull every member once (needs the Server Members Intent). Goes through the shared
+    // cache rather than a raw fetch -- Discord's gateway strictly rate-limits how often any
+    // bot can request a guild's full member list (opcode 8), and /sync running around the
+    // same time as the background watchers' own periodic fetches was enough to trip that
+    // limit and make the whole command hang or fail outright. A member list that's at most
+    // a minute old is a fine trade-off for an admin-run command like this.
+    const members = await fetchMembersCached(interaction.guild).catch(() => interaction.guild.members.cache);
 
     // Wipe the old roster + coach records for this guild, then rebuild from roles.
     // demands_used must survive this: it's a running season counter that has nothing to do
@@ -48,19 +57,24 @@ module.exports = {
        ON CONFLICT(guild_id, user_id) DO UPDATE SET team_id = excluded.team_id`
     );
 
-    const rosterJobs = [];
-    const staffJobs  = [];
-    const nameJobs   = [];
+    const rosterJobs = [];  // [teamName, discordId]
+    const staffJobs  = [];  // [teamName, discordId, slot, roleName]
+    const nameJobs   = [];  // [discordId, displayName]
 
+    // Resolve the staff role NAMES once rather than per member.
     const ownerRoleName  = ownerRole  ? (interaction.guild.roles.cache.get(ownerRole)?.name  || 'Owner')   : null;
     const coach1RoleName = coach1Role ? (interaction.guild.roles.cache.get(coach1Role)?.name || 'Coach 1') : null;
     const coach2RoleName = coach2Role ? (interaction.guild.roles.cache.get(coach2Role)?.name || 'Coach 2') : null;
 
     let playerCount = 0;
+    // Walk MEMBERS once and check which team role each holds, rather than looping every
+    // member once per team (teams x members). Also means a member holding two team roles
+    // is counted once, on the first team matched, instead of being inserted onto both.
     const teamByRoleId = new Map(teams.map(t => [t.role_id, t]));
     for (const member of members.values()) {
       if (member.user.bot) continue;
 
+      // Nickname backfill applies to everyone, not just rostered players.
       const displayName = member.nickname || member.user.globalName || member.user.username || null;
       if (displayName) nameJobs.push([member.id, displayName]);
 
@@ -85,14 +99,15 @@ module.exports = {
       }
       if (coach1Role && member.roles.cache.has(coach1Role)) {
         db.prepare('UPDATE teams SET coach1_id = ? WHERE id = ?').run(member.id, team.id);
-        staffJobs.push([team.name, member.id, 'gm', coach1RoleName]);
+        staffJobs.push([team.name, member.id, 'gm', coach1RoleName]); // Coach 1 -> GM slot
       }
       if (coach2Role && member.roles.cache.has(coach2Role)) {
         db.prepare('UPDATE teams SET coach2_id = ? WHERE id = ?').run(member.id, team.id);
-        staffJobs.push([team.name, member.id, 'hc', coach2RoleName]);
+        staffJobs.push([team.name, member.id, 'hc', coach2RoleName]); // Coach 2 -> HC slot
       }
     }
 
+    // One batched push instead of ~6 HTTP round-trips per player.
     let res;
     try {
       res = await bulkSyncToWebsite({ rosterJobs, staffJobs, nameJobs });
@@ -103,6 +118,8 @@ module.exports = {
       );
     }
 
+    // Report honestly when nothing reached the website -- the old version always claimed
+    // success even when every write had silently been skipped.
     if (!res.ok) {
       const why = {
         'no-active-season':      'no season is marked active on the website, so the bot has nowhere to write. Set the current season on the site first.',
@@ -116,6 +133,7 @@ module.exports = {
       );
     }
 
+    // ── DM anyone on a roster with no linked website account ──
     const base = (process.env.WEBSITE_URL || 'https://laurb5.com').replace(/\/+$/, '');
     let dmSent = 0, dmFailed = 0;
     const dmFailedMentions = [];
@@ -134,11 +152,13 @@ module.exports = {
             `showing up on your player page.`
           );
         try {
+          // members is already fetched above, so this is a cache hit -- no extra API call.
           const member = members.get(discordId) || await interaction.guild.members.fetch(discordId).catch(() => null);
           if (!member) { dmFailed++; continue; }
           await member.send({ embeds: [embed] });
           dmSent++;
         } catch (e) {
+          // Almost always "Cannot send messages to this user" -- DMs closed or bot blocked.
           dmFailed++;
           dmFailedMentions.push(`<@${discordId}>`);
         }
@@ -166,6 +186,7 @@ module.exports = {
     }
 
     if (res.noProfile.length) {
+      // Name them — knowing the count without knowing WHO is useless for actually fixing it.
       msg += `\n\nℹ️ ${res.noProfile.length} player${res.noProfile.length === 1 ? ' has' : 's have'} a linked account but no player profile yet, so no roster spot was written for them: ` +
              res.noProfile.slice(0, 20).map(id => `<@${id}>`).join(', ') +
              (res.noProfile.length > 20 ? ` and ${res.noProfile.length - 20} more` : '') +

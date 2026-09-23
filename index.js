@@ -94,6 +94,8 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
+  // Game claim buttons (Referee / Web Streamer / Discord Streamer / Lock / Force Drops) —
+  // handled globally, same durable reasoning as offers.
   if (interaction.isButton() && /^claim_(ref|webstream|discordstream|lock|forceref|forcewebstream|forcediscordstream)_\d+$/.test(interaction.customId)) {
     try {
       await require('./gameClaimHandler').handleClaimButton(interaction);
