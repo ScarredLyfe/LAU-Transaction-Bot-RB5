@@ -3,11 +3,12 @@
 //
 // Also resolves "pending claim" stat rows: when a game gets stats entered for someone who
 // doesn't have a website account yet, the admin can add them by Discord ID from the Stats &
-// Score editor's off-roster modal. That creates a row keyed "discord:<id>" instead of a real
-// Roblox name. This watcher checks, on the same poll, whether that Discord ID has since
-// registered -- and if so, rewrites the row to their real name automatically, everywhere it
-// appears across every game they were added to. Nothing further needs to happen on anyone's
-// part once the admin adds them.
+// Score editor's off-roster modal (optionally with an interim name and Roblox ID for their
+// avatar). That creates a row keyed "discord:<id>" instead of a real Roblox name. This
+// watcher checks, on the same poll, whether that Discord ID has since registered -- and if
+// so, rewrites the row to their real name automatically, everywhere it appears across every
+// game they were added to. Nothing further needs to happen on anyone's part once the admin
+// adds them.
 const { db } = require('./database');
 const { fetchMembersCached } = require('./memberCache');
 
@@ -53,6 +54,11 @@ function resolvePendingClaims(statsRows, playerdb) {
       const copy = Object.assign({}, r);
       copy.name = realName;
       delete copy.pendingClaim;
+      // The interim name/avatar were only ever a stand-in for display -- once resolved, the
+      // real playerdb name (and everywhere that looks up avatars by name) takes over, so
+      // these no longer serve any purpose and are dropped to keep the row clean.
+      delete copy.interimName;
+      delete copy.interimRobloxId;
       return copy;
     });
     if (rowChanged) changedKeys[key] = newRows;
@@ -95,6 +101,8 @@ async function poll(client) {
     ]);
     if (!Array.isArray(playerdb)) return;
 
+    // robloxId -> discordId, for backfilling rows that link to an account but never got
+    // their discordId copied onto the playerdb row itself.
     const discordIdByRoblox = new Map();
     if (accounts && typeof accounts === 'object') {
       for (const a of Object.values(accounts)) {
@@ -108,6 +116,7 @@ async function poll(client) {
     for (const p of playerdb) {
       if (!p) continue;
 
+      // Backfill a missing discordId from the matching account, same as /sync does.
       if (!p.discordId && p.robloxId) {
         const did = discordIdByRoblox.get(String(p.robloxId));
         if (did) { p.discordId = did; changed = true; }
@@ -115,7 +124,7 @@ async function poll(client) {
       if (!p.discordId) continue;
 
       const member = members.get(p.discordId);
-      if (!member) continue;
+      if (!member) continue; // not in the server (or intents/cache miss) -- nothing to do
 
       const currentNick = member.nickname || member.user.globalName || member.user.username || null;
       if (currentNick && p.displayName !== currentNick) {
@@ -131,6 +140,7 @@ async function poll(client) {
       console.log('[namesync] updated playerdb display names / discordId links');
     }
 
+    // Resolve any pending-claim stat rows now that playerdb is current for this poll.
     await resolvePendingClaimsForActiveSeason(playerdb);
   } catch (e) { console.error('[namesync] poll error', e); }
 }
