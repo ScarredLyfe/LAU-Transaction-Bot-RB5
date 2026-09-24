@@ -3,9 +3,10 @@
 // This watcher polls the data server, finds every fully-registered member in the server who
 // doesn't yet have the verified role, and grants verified + free-agent roles (removing unverified).
 const { db } = require('./database');
+const { fetchMembersCached } = require('./memberCache');
 
 const FB = (process.env.FIREBASE_URL || 'https://laurb5data-production.up.railway.app').replace(/\/+$/, '');
-const POLL_MS = 8000;
+const POLL_MS = 20000; // was 8000 -- see note below on why this matters
 
 async function fetchRegisteredDiscordIds() {
   const ids = new Set();
@@ -34,9 +35,18 @@ async function fetchRegisteredDiscordIds() {
   return ids;
 }
 
-async function grantVerified(guild, settings, discordId) {
-  const member = await guild.members.fetch(discordId).catch(() => null);
-  if (!member) { return false; } // not in the server — skip quietly
+async function grantVerified(guild, settings, discordId, members) {
+  // Looked up from the ALREADY-fetched member list (one shared fetch per poll, cached and
+  // reused across /sync, /offer, /game_reminder, nameSyncWatcher, and here) instead of a
+  // fresh REST call per person. The old version called guild.members.fetch(discordId)
+  // separately for every single registered account, every poll -- with hundreds of
+  // registered accounts, that was hundreds of Discord API requests every few seconds,
+  // competing with every other command for the bot's shared rate-limit budget. Most of
+  // those calls were wasted too: almost everyone is already verified and gets skipped right
+  // after the fetch, so the expensive part was happening for people there was nothing to do
+  // for.
+  const member = members.get(discordId);
+  if (!member) return false; // not in the server — skip quietly
 
   if (settings.verified_role_id && member.roles.cache.has(settings.verified_role_id)) return false;
 
@@ -73,13 +83,19 @@ async function poll(client) {
     }
 
     const registered = await fetchRegisteredDiscordIds();
-    console.log(`[verify] poll: ${registered.size} fully-registered account(s) found on the site`);
+    const members = await fetchMembersCached(guild).catch(() => guild.members.cache);
+    let grantedCount = 0;
     for (const discordId of registered) {
       try {
-        const r = await grantVerified(guild, settings, discordId);
-        if (r) console.log(`[verify] granted roles to ${discordId}`);
+        const r = await grantVerified(guild, settings, discordId, members);
+        if (r) grantedCount++;
       }
       catch (e) { console.error('[verify] grant failed for ' + discordId, e); }
+    }
+    // Only log when there's something worth reporting -- logging "358 found" every single
+    // cycle forever, whether or not anything changed, was mostly just noise.
+    if (grantedCount > 0) {
+      console.log(`[verify] poll: granted roles to ${grantedCount} newly-registered member(s) out of ${registered.size} total registered`);
     }
   } catch (e) { console.error('[verify] poll error', e); }
 }
