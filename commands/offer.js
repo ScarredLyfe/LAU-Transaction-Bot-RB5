@@ -52,6 +52,12 @@ module.exports = {
       return reject('That player is already on a team.');
     }
 
+    // Unverified members can't be offered: they haven't linked their account yet, so the
+    // website has no Roblox/Discord record to put on the roster.
+    if (settings.unverified_role_id && playerMember.roles.cache.has(settings.unverified_role_id)) {
+      return reject('That player is unverified. They need to register on the website and get verified before they can be offered.');
+    }
+
     const rosterSize = settings.roster_size;
     // Count only players who are BOTH still in the database as this team's roster AND
     // currently hold the team's Discord role -- not just the database alone. If someone's

@@ -112,6 +112,14 @@ async function handleOfferButton(interaction) {
     return;
   }
 
+  // Offers sent before they lost verification (or older offers) can't be accepted while unverified.
+  const verifySettings = db.prepare('SELECT unverified_role_id FROM guild_settings WHERE guild_id = ?').get(offer.guild_id);
+  if (verifySettings && verifySettings.unverified_role_id && playerMember.roles.cache.has(verifySettings.unverified_role_id)) {
+    await interaction.editReply({ content: 'You\'re still unverified, so you can\'t join a team yet. Register on the website to get verified, then ask the team to send a new offer.', embeds: [], components: [] });
+    db.prepare('UPDATE pending_offers SET status = ? WHERE id = ?').run('expired', offerId);
+    return;
+  }
+
   // If they're already on a team by the time they accept (signed elsewhere in the meantime),
   // don't double-sign them.
   const alreadyOnTeam = db.prepare('SELECT team_id FROM players WHERE guild_id = ? AND user_id = ?').get(offer.guild_id, offer.player_id);
