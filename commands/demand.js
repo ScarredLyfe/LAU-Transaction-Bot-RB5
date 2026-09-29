@@ -30,6 +30,14 @@ module.exports = {
     const team = findMemberTeam(interaction.member, teams);
     if (!team) return reject('You\'re not on a team.');
 
+    // Athletic directors (team owners) can't demand a release from their own team.
+    const ownerRole = db.prepare("SELECT role_id FROM coach_roles WHERE guild_id = ? AND position = 'owner'").get(interaction.guildId);
+    const isAthleticDirector = team.owner_id === interaction.user.id
+      || (ownerRole && interaction.member.roles.cache.has(ownerRole.role_id));
+    if (isAthleticDirector) {
+      return reject('Athletic directors can\'t demand a release. Ask a league admin if you need to step down.');
+    }
+
     const row = db.prepare('SELECT demands_used FROM players WHERE guild_id = ? AND user_id = ?').get(interaction.guildId, interaction.user.id);
     const used = row ? row.demands_used : 0;
     if (used >= settings.max_demands) {
