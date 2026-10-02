@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, MessageFlags, EmbedBuilder } = require('discord.js');
 const { db, ensureGuild } = require('../database');
-const { fetchMembersCached } = require('../memberCache');
+const { getMembers, liveRosterIds, liveStaff } = require('../rosterLive');
 
 function emojiToUrl(emoji) {
   if (!emoji) return null;
@@ -33,9 +33,7 @@ module.exports = {
     if (!team) return reject('That role isn\'t a registered team.');
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const members = await fetchMembersCached(interaction.guild).catch(() => interaction.guild.members.cache);
-    const roleHolderIds = new Set();
-    members.forEach(m => { if (m.roles.cache.has(team.role_id)) roleHolderIds.add(m.id); });
+    const members = await getMembers(interaction.guild);
 
     const ownerRoleId  = db.prepare("SELECT role_id FROM coach_roles WHERE guild_id = ? AND position = 'owner'").get(interaction.guildId)?.role_id;
     const coach1RoleId = db.prepare("SELECT role_id FROM coach_roles WHERE guild_id = ? AND position = 'coach_1'").get(interaction.guildId)?.role_id;
@@ -45,18 +43,20 @@ module.exports = {
     const coach1RoleName = (coach1RoleId && interaction.guild.roles.cache.get(coach1RoleId)?.name) || 'Coach 1';
     const coach2RoleName = (coach2RoleId && interaction.guild.roles.cache.get(coach2RoleId)?.name) || 'Coach 2';
 
-    const rowsRaw = db.prepare(
-      'SELECT user_id FROM players WHERE guild_id = ? AND team_id = ?'
-    ).all(interaction.guildId, team.id);
-    const rows = rowsRaw.filter(r => roleHolderIds.has(r.user_id));
+    // Only people who currently hold the team role count. Staff spots are read from the live
+    // Discord roles too, so removing someone's Athletic Director / coach role by hand shows
+    // up right away instead of the old holder staying listed.
+    const rosterIds = liveRosterIds(members, interaction.guildId, team);
+    const ownerId  = liveStaff(members, interaction.guildId, team, 'owner');
+    const coach1Id = liveStaff(members, interaction.guildId, team, 'coach_1');
+    const coach2Id = liveStaff(members, interaction.guildId, team, 'coach_2');
+    const coachIds = [ownerId, coach1Id, coach2Id].filter(Boolean);
 
-    const coachIds = [team.owner_id, team.coach1_id, team.coach2_id].filter(Boolean);
+    const ownerLine  = ownerId  ? await formatUser(interaction.client, ownerId)  : '*None*';
+    const coach1Line = coach1Id ? await formatUser(interaction.client, coach1Id) : '*None*';
+    const coach2Line = coach2Id ? await formatUser(interaction.client, coach2Id) : '*None*';
 
-    const ownerLine  = (team.owner_id  && roleHolderIds.has(team.owner_id))  ? await formatUser(interaction.client, team.owner_id)  : '*None*';
-    const coach1Line = (team.coach1_id && roleHolderIds.has(team.coach1_id)) ? await formatUser(interaction.client, team.coach1_id) : '*None*';
-    const coach2Line = (team.coach2_id && roleHolderIds.has(team.coach2_id)) ? await formatUser(interaction.client, team.coach2_id) : '*None*';
-
-    const playerIds = rows.map(r => r.user_id).filter(id => !coachIds.includes(id));
+    const playerIds = rosterIds.filter(id => !coachIds.includes(id));
     const playerLines = [];
     for (const id of playerIds) {
       playerLines.push('• ' + await formatUser(interaction.client, id));
@@ -76,7 +76,7 @@ module.exports = {
       .setAuthor({ name: leagueName, iconURL: interaction.guild.iconURL() || undefined })
       .setTitle(`${team.emoji} ${team.name} Roster`)
       .addFields(
-        { name: '📋 Roster Count', value: `${rows.length}/${settings.roster_size}`, inline: true },
+        { name: '📋 Roster Count', value: `${rosterIds.length}/${settings.roster_size}`, inline: true },
         { name: `👑 ${ownerRoleName}`,  value: ownerLine,  inline: false },
         { name: `🅰️ ${coach1RoleName}`, value: coach1Line, inline: false },
         { name: `🅱️ ${coach2RoleName}`, value: coach2Line, inline: false },

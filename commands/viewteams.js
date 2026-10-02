@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags, EmbedBuilder } = require('discord.js');
 const { db, ensureGuild } = require('../database');
+const { getMembers, liveRosterIds } = require('../rosterLive');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -21,13 +22,12 @@ module.exports = {
       });
     }
 
-    // Roster count per team (players currently assigned to that team in the database).
-    const countStmt = db.prepare(
-      'SELECT COUNT(*) AS c FROM players WHERE guild_id = ? AND team_id = ?'
-    );
+    // Roster count per team: players on that team who still hold its Discord role.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const members = await getMembers(interaction.guild);
 
     const list = teams.map(t => {
-      const count = countStmt.get(interaction.guildId, t.id).c;
+      const count = liveRosterIds(members, interaction.guildId, t).length;
       return `${t.emoji} <@&${t.role_id}> \`(${count} on roster)\``;
     }).join('\n');
 
@@ -36,9 +36,8 @@ module.exports = {
       .setDescription(list)
       .setFooter({ text: `${teams.length} team${teams.length === 1 ? '' : 's'} total` });
 
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [embed],
-      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
   },

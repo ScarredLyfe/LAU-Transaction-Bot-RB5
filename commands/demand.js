@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, MessageFlags, EmbedBuilder } = require('discord.js');
 const { db, ensureGuild } = require('../database');
 const { makeFreeAgent } = require('../freeAgent');
+const { getMembers, liveStaff } = require('../rosterLive');
 
 function findMemberTeam(member, teams) {
   return teams.find(t => member.roles.cache.has(t.role_id));
@@ -31,8 +32,11 @@ module.exports = {
     if (!team) return reject('You\'re not on a team.');
 
     // Athletic directors (team owners) can't demand a release from their own team.
+    // Uses the live Discord roles, so someone whose Athletic Director role was removed by hand
+    // can demand again, and whoever holds the role now can't.
     const ownerRole = db.prepare("SELECT role_id FROM coach_roles WHERE guild_id = ? AND position = 'owner'").get(interaction.guildId);
-    const isAthleticDirector = team.owner_id === interaction.user.id
+    const liveAD = liveStaff(await getMembers(interaction.guild), interaction.guildId, team, 'owner');
+    const isAthleticDirector = liveAD === interaction.user.id
       || (ownerRole && interaction.member.roles.cache.has(ownerRole.role_id));
     if (isAthleticDirector) {
       return reject('Athletic directors can\'t demand a release. Ask a league admin if you need to step down.');

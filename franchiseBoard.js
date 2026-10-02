@@ -3,6 +3,7 @@
 // each refresh so there's only ever one live copy instead of the channel filling up.
 const { EmbedBuilder } = require('discord.js');
 const { db } = require('./database');
+const { getMembers, liveRosterIds, liveStaff } = require('./rosterLive');
 
 const REFRESH_MS = 60 * 60 * 1000; // every hour
 
@@ -18,9 +19,13 @@ async function postFranchiseBoard(client, guildId) {
   const teams = db.prepare('SELECT * FROM teams WHERE guild_id = ? ORDER BY name').all(guildId);
   const rosterSize = settings.roster_size || 10;
 
+  // Live roles, same as /roster: only current team-role holders count, and the Athletic
+  // Director is whoever on the team actually holds that role right now.
+  const members = await getMembers(guild);
   const lines = teams.map(t => {
-    const count = db.prepare('SELECT COUNT(*) AS c FROM players WHERE guild_id = ? AND team_id = ?').get(guildId, t.id).c;
-    const owner = t.owner_id ? `<@${t.owner_id}>` : 'Open';
+    const count = liveRosterIds(members, guildId, t).length;
+    const ownerId = liveStaff(members, guildId, t, 'owner');
+    const owner = ownerId ? `<@${ownerId}>` : 'Open';
     const roleTag = guild.roles.cache.has(t.role_id) ? `<@&${t.role_id}>` : t.name;
     return `${t.emoji || ''} ${roleTag}: ${owner} (${count}/${rosterSize})`;
   });

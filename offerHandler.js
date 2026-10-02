@@ -9,6 +9,7 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder } = require('discord.js');
 const { db } = require('./database');
 const { addPlayerToWebsiteRoster, setWebsiteDisplayName } = require('./firebaseSync');
+const { getMembers, liveRosterIds } = require('./rosterLive');
 
 function disabledRowFrom(message) {
   const row = message.components[0];
@@ -96,9 +97,11 @@ async function handleOfferButton(interaction) {
   // cap instead of the real one.
   const currentSettings = db.prepare('SELECT roster_size FROM guild_settings WHERE guild_id = ?').get(offer.guild_id);
   const currentCap = (currentSettings && currentSettings.roster_size) || offer.roster_size;
-  const nowCount = db.prepare(
-    'SELECT COUNT(*) AS c FROM players WHERE guild_id = ? AND team_id = ?'
-  ).get(offer.guild_id, offer.team_id).c;
+  // Count the roster the same way /offer and /roster do: only people still holding the team
+  // role. (Counting raw database rows included players who'd already left the team, so a
+  // roster that wasn't full could reject the accept as "filled up".)
+  const liveMembers = await getMembers(guild);
+  const nowCount = liveRosterIds(liveMembers, offer.guild_id, team).length;
   if (nowCount >= currentCap) {
     db.prepare('UPDATE pending_offers SET status = ? WHERE id = ?').run('expired', offerId);
     await interaction.editReply({ content: 'This team\'s roster filled up before you accepted.', embeds: [], components: [] });
